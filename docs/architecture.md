@@ -28,6 +28,16 @@ This is **not** VLM-as-parser. Page-level Granite-Docling / SmolDocling
 convert lives in `grpc-vlm-convert`. Enrichment only writes on items
 that already exist (`PictureItem`, code, formulas).
 
+## Live results (vs Docling)
+
+Docling runs the enrichment pipe and then returns the converted
+document, so picture-describe latency is on the critical path of
+convert. We stream **one annotation event per item as that VLM call
+returns**. A UI can show captions appearing on figures that already
+have boxes from parse, while later pictures are still in flight. A
+failed crop is `ItemSkipped` on the stream, not a held back document.
+`EnrichComplete` is a trailer.
+
 ## What this process owns
 
 - Walking a `Document` for enrichable items (pictures above an area

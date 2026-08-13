@@ -6,7 +6,10 @@
   picture description, chart extraction, code OCR, formula OCR.
 - `Document` in / annotated `Document` (or a stream of patches) out.
   Same refs (`#/pictures/3`). Additive annotations; never rewrite
-  provenance boxes.
+  provenance boxes. Patches stream **as each VLM call returns** so a
+  UI can show captions appearing on already-parsed figures. Docling
+  waits for the enrichment pipe; we do not. A unary full Document at
+  the end is convenience only.
 - One slow VLM must not block parse. Independent replica count.
 - Typed wire: descriptions are strings on the picture, charts become
   `TableItem`s linked from the picture, code/formula replace or
