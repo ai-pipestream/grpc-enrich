@@ -2,11 +2,24 @@
 
 gRPC enrichment service: VLM picture-describe, chart extract, and formula/code annotations on a gRParse Document
 
+This repo is a spec plus (soon) a standalone gRPC server. It is not
+PipeStream core and not a Docling Python wrapper.
+
+## Start here (humans and LLMs)
+
+1. [`AGENTS.md`](AGENTS.md) — read order, definition of done, git
+2. [`docs/architecture.md`](docs/architecture.md) — where this sits, language, live stream vs Docling
+3. [`docs/design.md`](docs/design.md) — wire API, Document mapping, tests
+4. [`docs/guidelines.md`](docs/guidelines.md) — fleet rules (streaming, proto, diskless, git)
+
+Implementation is greenfield. Copy operational patterns from
+`/work/main/grpc-services/gRParse for Document handling; call llama.cpp / OVMS / OpenAI-compat HTTP — do not vendor transformers.`.
 
 ## Docs
 
 - [Architecture](docs/architecture.md) — where this sits in the collector fleet
 - [Design](docs/design.md) — wire API, Document mapping, tests
+- [Guidelines](docs/guidelines.md) — how to build it so it matches the fleet
 
 ## Remotes
 
