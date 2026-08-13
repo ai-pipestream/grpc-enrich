@@ -2,6 +2,12 @@
 
 gRPC enrichment service: VLM picture-describe, chart extract, and formula/code annotations on a gRParse Document
 
+
+## Docs
+
+- [Architecture](docs/architecture.md) — where this sits in the collector fleet
+- [Design](docs/design.md) — wire API, Document mapping, tests
+
 ## Remotes
 
 - **Forgejo** (`git.rokkon.com/ai-pipestream/grpc-enrich`) is the source of truth. `main` lives here.

@@ -1,0 +1,70 @@
+# grpc-enrich architecture
+
+**Status:** spec (no implementation yet)
+**Updated:** 2026-08-13
+
+## Where this sits
+
+Docling folds VLM enrichment into convert (`do_picture_description`,
+`do_chart_extraction`, `do_code_enrichment`, `do_formula_enrichment`).
+That is why convert is slow and why a layout GPU fights a 12 B VLM.
+This service is the **second plane**: a `Document` in, annotations
+out. Parse stays fast; enrichment is opt-in and independently scaled.
+
+```text
+Document  (already parsed by gRParse + collectors)
+        │
+        ▼
+   grpc-enrich         picture describe / chart→table / code / formula
+        │              (calls a VLM server; no torch in this process)
+        ▼
+   Document'  (same refs, extra annotations)
+        │
+        ▼
+   protomolt sink
+```
+
+This is **not** VLM-as-parser. Page-level Granite-Docling / SmolDocling
+convert lives in `grpc-vlm-convert`. Enrichment only writes on items
+that already exist (`PictureItem`, code, formulas).
+
+## What this process owns
+
+- Walking a `Document` for enrichable items (pictures above an area
+  threshold, tables that look like charts, code/formula text).
+- Calling a **remote** VLM (llama.cpp HTTP/gRPC, OVMS KServe v2,
+  OpenAI-compatible endpoint). Presets map to Docling's names
+  (Granite Vision, SmolVLM, granite-vision-chart2csv, CodeFormulaV2)
+  but the weights are served elsewhere.
+- Streaming annotations back keyed by `self_ref` so the caller can
+  patch a live document without buffering the whole result.
+- Timeouts, concurrency caps, and per-item failure that **does not**
+  fail the RPC (a bad crop skips; the rest continue).
+
+## What this process does not own
+
+| Concern | Owner |
+|---|---|
+| Layout, OCR, table structure, figure class, barcodes | gRParse CV (already done) |
+| Full-page VLM parse | `grpc-vlm-convert` |
+| Loading Hugging Face transformers / torch | never, in this fleet |
+| Chunking / embeddings | downstream |
+| Export | protomolt |
+
+## Language
+
+**C++ or Java**, talking HTTP/gRPC to the model server. Prefer C++ if
+we share crop/PNG encode with gRParse's picture pipeline; Java if we
+want this next to protomolt's mapper. Either way: **no PyTorch** in
+the serving path.
+
+Picture bytes come from `ImageRef` on the item (data URI or a
+claim-check the caller already filled). This service does not rasterize
+PDFs.
+
+## Relationship to gRParse
+
+gRParse may call enrich after merge, or the client may call it
+separately. Enrichment is never an implicit side effect of parse.
+`ConvertDocumentOptions.do_picture_description` in the parse proto is
+a **hint the coordinator may forward**, not work gRParse does itself.
