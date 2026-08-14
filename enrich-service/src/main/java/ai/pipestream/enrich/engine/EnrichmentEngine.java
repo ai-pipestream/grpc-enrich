@@ -1,6 +1,7 @@
 package ai.pipestream.enrich.engine;
 
 import ai.pipestream.document.v1.BaseTextItem;
+import ai.pipestream.document.v1.CodeItem;
 import ai.pipestream.document.v1.DescriptionAnnotation;
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.document.v1.PictureAnnotation;
@@ -157,7 +158,9 @@ public final class EnrichmentEngine {
       ConcurrentLinkedQueue<WorkItem> order,
       ConcurrentLinkedQueue<ItemAnnotation> annotations) {
     try {
-      String content = client.complete(item.model(), item.prompt(), item.imageDataUri(), timeout);
+      String content =
+          client.complete(item.model(), item.prompt(), item.imageDataUri(), item.maxTokens(),
+              timeout);
       ItemAnnotation.Builder annotation = ItemAnnotation.newBuilder()
           .setSelfRef(item.selfRef())
           .setModel(item.model());
@@ -166,8 +169,16 @@ public final class EnrichmentEngine {
         case CHART -> annotation.getChartTableBuilder()
             .setTable(ChartCsvParser.parse(content))
             .setCsv(content);
-        case CODE -> annotation.getCodeBuilder().setText(content);
-        case FORMULA -> annotation.getFormulaBuilder().setText(content);
+        case CODE -> {
+          CodeFormulaPostProcessor.CodeResult code =
+              CodeFormulaPostProcessor.processCode(content);
+          annotation.getCodeBuilder()
+              .setText(code.text())
+              .setLanguage(code.language())
+              .setLanguageRaw(code.languageRaw());
+        }
+        case FORMULA -> annotation.getFormulaBuilder()
+            .setText(CodeFormulaPostProcessor.processFormula(content));
       }
       ItemAnnotation built = annotation.build();
       succeeded.incrementAndGet();
@@ -220,9 +231,13 @@ public final class EnrichmentEngine {
         }
         case CODE -> {
           BaseTextItem text = patched.getTexts(item.textIndex());
-          patched.setTexts(item.textIndex(), text.toBuilder()
-              .setCode(text.getCode().toBuilder().setText(annotation.getCode().getText()))
-              .build());
+          CodeItem.Builder code = text.getCode().toBuilder()
+              .setText(annotation.getCode().getText())
+              .setCodeLanguage(annotation.getCode().getLanguage());
+          if (!annotation.getCode().getLanguageRaw().isEmpty()) {
+            code.setCodeLanguageRaw(annotation.getCode().getLanguageRaw());
+          }
+          patched.setTexts(item.textIndex(), text.toBuilder().setCode(code).build());
         }
         case FORMULA -> {
           BaseTextItem text = patched.getTexts(item.textIndex());

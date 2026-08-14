@@ -11,6 +11,11 @@ import java.util.List;
  * Turns the CSV a chart2csv-style VLM returns into typed TableData cells.
  * The chart table is typed cells on the wire; the raw CSV only rides along in
  * the annotation for debugging.
+ *
+ * <p>Docling parity (granite_vision.py _dataframe_to_tabledata): the first
+ * row is a column-header row only when ALL its values are non-numeric; any
+ * non-numeric data cell is marked row_header=true; spans are 1x1 and no bbox
+ * is set.
  */
 public final class ChartCsvParser {
 
@@ -18,7 +23,7 @@ public final class ChartCsvParser {
 
   /**
    * Parses CSV text (RFC 4180-ish: quoted fields, embedded commas and quotes)
-   * into a TableData with one header row marked as column headers.
+   * into a TableData, inferring the header row from numeric content.
    *
    * @throws VlmException when the text is empty or the rows are ragged
    */
@@ -29,28 +34,32 @@ public final class ChartCsvParser {
     }
     int numCols = rows.get(0).size();
     if (numCols == 0) {
-      throw new VlmException("chart model returned an empty header row");
+      throw new VlmException("chart model returned an empty first row");
     }
     for (List<String> row : rows) {
       if (row.size() != numCols) {
         throw new VlmException("chart model returned ragged CSV rows");
       }
     }
+    boolean firstRowIsHeader = rows.get(0).stream().allMatch(value -> !isNumeric(value));
     TableData.Builder table = TableData.newBuilder()
         .setNumRows(rows.size())
         .setNumCols(numCols);
     for (int r = 0; r < rows.size(); r++) {
       TableRow.Builder gridRow = TableRow.newBuilder();
+      boolean headerRow = firstRowIsHeader && r == 0;
       for (int c = 0; c < numCols; c++) {
+        String value = rows.get(r).get(c);
         TableCell cell = TableCell.newBuilder()
-            .setText(rows.get(r).get(c))
+            .setText(value)
             .setRowSpan(1)
             .setColSpan(1)
             .setStartRowOffsetIdx(r)
             .setEndRowOffsetIdx(r + 1)
             .setStartColOffsetIdx(c)
             .setEndColOffsetIdx(c + 1)
-            .setColumnHeader(r == 0)
+            .setColumnHeader(headerRow)
+            .setRowHeader(!headerRow && !isNumeric(value))
             .build();
         table.addTableCells(cell);
         gridRow.addCells(cell);
@@ -58,6 +67,21 @@ public final class ChartCsvParser {
       table.addGrid(gridRow);
     }
     return table.build();
+  }
+
+  /** A value is numeric when it parses as a double (Docling uses pandas dtype
+   * inference; empty cells count as non-numeric, like pandas NaN). */
+  private static boolean isNumeric(String value) {
+    String trimmed = value.trim();
+    if (trimmed.isEmpty()) {
+      return false;
+    }
+    try {
+      Double.parseDouble(trimmed);
+      return true;
+    } catch (NumberFormatException notNumeric) {
+      return false;
+    }
   }
 
   private static List<List<String>> parseRows(String csv) {

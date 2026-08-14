@@ -1,7 +1,7 @@
 # grpc-enrich architecture
 
 **Status:** implemented (v1 definition of done)
-**Updated:** 2026-08-13
+**Updated:** 2026-08-14
 
 Implementers start at [`AGENTS.md`](../AGENTS.md), then this file, `design.md`, and `guidelines.md`.
 
@@ -42,12 +42,26 @@ failed crop is `ItemSkipped` on the stream, not a held back document.
 
 ## What this process owns
 
-- Walking a `Document` for enrichable items (pictures above an area
-  threshold, tables that look like charts, code/formula text).
+- Walking a `Document` for enrichable items, with Docling parity on the
+  gates: pictures at or above **0.05 of the page area** by default for
+  description (a negative threshold disables the check), pictures whose
+  top figure-class prediction is a Docling supported chart type
+  (`bar_chart` / `pie_chart` / `line_chart`) or whose label is
+  `DOC_ITEM_LABEL_CHART` for chart extraction, and code/formula text
+  items.
 - Calling a **remote** VLM (llama.cpp HTTP/gRPC, OVMS KServe v2,
   OpenAI-compatible endpoint). Presets map to Docling's names
   (Granite Vision, SmolVLM, granite-vision-chart2csv, CodeFormulaV2)
-  but the weights are served elsewhere.
+  and use Docling's exact prompts and generation budgets (description
+  200, code/formula 2048, chart 4096 max tokens), but the weights are
+  served elsewhere.
+- Docling-parity output handling: chart CSV becomes typed `TableData`
+  (header row only when the first row is all non-numeric; non-numeric
+  data cells are `row_header`), and code/formula output is stripped of
+  Docling's sentinels with the leading `<_language_>` token mapped to
+  `CodeLanguageLabel` (UNKNOWN fallback). Code/formula items are sent
+  as image crops with the bare `<code>` / `<formula>` prompt when a
+  crop is available; text-only is the fallback.
 - Streaming annotations back keyed by `self_ref` so the caller can
   patch a live document without buffering the whole result.
 - Timeouts, concurrency caps, and per-item failure that **does not**

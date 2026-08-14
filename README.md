@@ -61,6 +61,46 @@ v1alpha).
 `ai/pipestream/document/v1/document.proto` is vendored verbatim from gRParse
 (the canonical copy); do not edit it here.
 
+## Docling parity
+
+Enrichment semantics mirror Docling's enrichment pipeline
+(`picture_description_base_model.py`, `chart_extraction/granite_vision.py`,
+`code_formula_vlm_model.py`):
+
+- **Area threshold** — `picture_description_area_threshold` unset (0) applies
+  Docling's default **0.05** of the page area; a negative value disables the
+  threshold entirely.
+- **Prompts are Docling's verbatim strings** — SmolVLM: `Describe this image
+  in a few sentences.`; Granite Vision: `What is shown in this image?`; chart:
+  `Convert the information in this chart into a data table in CSV format.`;
+  code/formula with an image crop: the bare `<code>` / `<formula>`.
+- **Chart gate** — chart extraction runs when the picture's top
+  figure-class prediction is one of Docling's `SUPPORTED_CHART_TYPES`
+  (`bar_chart`, `pie_chart`, `line_chart`). One intentional excess over
+  Docling: a picture labelled `DOC_ITEM_LABEL_CHART` also triggers it.
+- **Chart CSV → TableData** — the first row is a column-header row only when
+  all its values are non-numeric; any non-numeric data cell is marked
+  `row_header=true` (pandas NaN/empty counts as non-numeric).
+- **Code/formula send the image crop** when an `ItemImage` is supplied for
+  the item's `self_ref` (code items may also carry an inline data-URI
+  `ImageRef`); without a crop, a text-only prompt with the existing item text
+  is the fallback (not a Docling mode). All code/formula output is
+  post-processed like Docling: truncate at `<end_of_utterance>`, strip
+  `</code>` / `</formula>` / the `<loc_0>…` sentinel, lstrip, and parse the
+  leading `<_language_>` token into `CodeAnnotation.language` (exact-case
+  match against docling-core's value strings, UNKNOWN fallback) and
+  `language_raw`. `return_document` also sets `code_language` /
+  `code_language_raw` on the patched `CodeItem`.
+- **Generation budgets (max_tokens)** — description 200, code/formula 2048
+  (Docling's values); chart 4096 (ours: Docling uses the model's max length,
+  and a wide table does not fit in 2048).
+
+Where we deliberately exceed Docling: `ItemSkipped` events carry explicit
+skip reasons (Docling silently stores empty strings), a failed VLM call is an
+event rather than a failed RPC, events stream before the client half-closes,
+and description annotations record the model name as provenance (Docling's
+API path records "not-implemented").
+
 ## Start here (humans and LLMs)
 
 1. [`AGENTS.md`](AGENTS.md) — read order, definition of done, git

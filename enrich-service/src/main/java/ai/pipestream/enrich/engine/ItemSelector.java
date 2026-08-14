@@ -16,12 +16,20 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Walks a Document for enrichable items, mirroring Docling's enrichment flags:
  * pictures above an area threshold for description, chart-classified pictures
  * for chart extraction, and text items already labelled code or formula. This
  * service never re-runs layout: labels from gRParse are the authority.
+ *
+ * <p>Docling parity: the area threshold defaults to 0.05 of the page area,
+ * prompts are the exact strings the SmolVLM / Granite Vision / chart2csv /
+ * CodeFormula presets use, and a picture is a chart when its top
+ * figure-class prediction is one of Docling's SUPPORTED_CHART_TYPES
+ * (bar_chart, pie_chart, line_chart). One intentional excess over Docling:
+ * a picture labelled DOC_ITEM_LABEL_CHART also triggers chart extraction.
  */
 public final class ItemSelector {
 
@@ -41,6 +49,7 @@ public final class ItemSelector {
       String prompt,
       String imageDataUri,
       String text,
+      int maxTokens,
       int pictureIndex,
       int textIndex) {}
 
@@ -52,13 +61,37 @@ public final class ItemSelector {
     }
   }
 
-  private static final String DESCRIBE_PROMPT =
-      "Describe this picture in detail.";
+  /** Docling's default picture_description_area_threshold (fraction of page). */
+  static final double DEFAULT_AREA_THRESHOLD = 0.05;
+
+  /** Docling's generation caps: description 200, code/formula 2048. Chart gets
+   * 4096 because a wide table does not fit in Docling's code/formula budget. */
+  static final int MAX_TOKENS_DESCRIPTION = 200;
+  static final int MAX_TOKENS_CODE_FORMULA = 2048;
+  static final int MAX_TOKENS_CHART = 4096;
+
+  /** Docling's SUPPORTED_CHART_TYPES for chart extraction (top prediction,
+   * lowercased, exact match). */
+  private static final Set<String> SUPPORTED_CHART_TYPES =
+      Set.of("bar_chart", "pie_chart", "line_chart");
+
+  // Prompts, verbatim from Docling (pipeline_options.py, granite_vision.py,
+  // code_formula_vlm_model.py).
+  private static final String DESCRIBE_PROMPT_SMOLVLM =
+      "Describe this image in a few sentences.";
+  private static final String DESCRIBE_PROMPT_GRANITE_VISION =
+      "What is shown in this image?";
   private static final String CHART_PROMPT =
-      "Extract the chart data from this image as a CSV table, with a header row.";
-  private static final String CODE_PROMPT =
+      "Convert the information in this chart into a data table in CSV format.";
+  private static final String CODE_IMAGE_PROMPT = "<code>";
+  private static final String FORMULA_IMAGE_PROMPT = "<formula>";
+
+  // Text-only fallbacks for code/formula items with no image crop: not a
+  // Docling mode (Docling always sends the crop), kept so enrichment still
+  // works when the caller cannot supply crops.
+  private static final String CODE_TEXT_PROMPT =
       "Transcribe and normalize the following code block. Reply with the code only.\n\n";
-  private static final String FORMULA_PROMPT =
+  private static final String FORMULA_TEXT_PROMPT =
       "Transcribe the following formula to LaTeX. Reply with the formula only.\n\n";
 
   private ItemSelector() {}
@@ -86,17 +119,17 @@ public final class ItemSelector {
         }
         continue;
       }
-      String image = imageDataUri(picture, selfRef, crops);
+      String image = imageDataUri(picture.getImage(), selfRef, crops);
       if (image == null) {
         skips.add(imageSkip(picture, selfRef));
         continue;
       }
       if (chartJob) {
         work.add(new WorkItem(selfRef, Kind.CHART, chartModel(options), CHART_PROMPT, image,
-            null, i, -1));
+            null, MAX_TOKENS_CHART, i, -1));
       } else {
         work.add(new WorkItem(selfRef, Kind.DESCRIPTION, descriptionModel(options),
-            DESCRIBE_PROMPT, image, null, i, -1));
+            describePrompt(options), image, null, MAX_TOKENS_DESCRIPTION, i, -1));
       }
     }
 
@@ -105,14 +138,29 @@ public final class ItemSelector {
       if (options.getDoCodeEnrichment() && baseText.hasCode()) {
         CodeItem code = baseText.getCode();
         String selfRef = selfRef(code.getSelfRef(), "#/texts/", i);
-        work.add(new WorkItem(selfRef, Kind.CODE, codeFormulaModel(options),
-            CODE_PROMPT + code.getText(), null, code.getText(), -1, i));
+        String image = code.hasImage() ? imageDataUri(code.getImage(), selfRef, crops)
+            : cropDataUri(selfRef, crops);
+        if (image != null) {
+          work.add(new WorkItem(selfRef, Kind.CODE, codeFormulaModel(options), CODE_IMAGE_PROMPT,
+              image, code.getText(), MAX_TOKENS_CODE_FORMULA, -1, i));
+        } else {
+          work.add(new WorkItem(selfRef, Kind.CODE, codeFormulaModel(options),
+              CODE_TEXT_PROMPT + code.getText(), null, code.getText(), MAX_TOKENS_CODE_FORMULA,
+              -1, i));
+        }
       } else if (options.getDoFormulaEnrichment() && baseText.hasFormula()) {
         FormulaItem formula = baseText.getFormula();
         String selfRef = selfRef(formula.getBase().getSelfRef(), "#/texts/", i);
-        work.add(new WorkItem(selfRef, Kind.FORMULA, codeFormulaModel(options),
-            FORMULA_PROMPT + formula.getBase().getText(), null, formula.getBase().getText(),
-            -1, i));
+        String image = cropDataUri(selfRef, crops);
+        if (image != null) {
+          work.add(new WorkItem(selfRef, Kind.FORMULA, codeFormulaModel(options),
+              FORMULA_IMAGE_PROMPT, image, formula.getBase().getText(), MAX_TOKENS_CODE_FORMULA,
+              -1, i));
+        } else {
+          work.add(new WorkItem(selfRef, Kind.FORMULA, codeFormulaModel(options),
+              FORMULA_TEXT_PROMPT + formula.getBase().getText(), null, formula.getBase().getText(),
+              MAX_TOKENS_CODE_FORMULA, -1, i));
+        }
       }
     }
 
@@ -123,8 +171,9 @@ public final class ItemSelector {
     return declared.isEmpty() ? prefix + index : declared;
   }
 
-  /** A picture is a chart when its label says so or its top figure-class
-   * prediction is a chart class; there is no layout re-run here. */
+  /** A picture is a chart when its label says so (our addition over Docling)
+   * or its top figure-class prediction is one of Docling's supported chart
+   * types; there is no layout re-run here. */
   private static boolean isChart(PictureItem picture) {
     if (picture.getLabel() == ai.pipestream.document.v1.DocItemLabel.DOC_ITEM_LABEL_CHART) {
       return true;
@@ -133,11 +182,10 @@ public final class ItemSelector {
       if (annotation.hasClassification()) {
         PictureClassificationData classification = annotation.getClassification();
         if (classification.getPredictedClassesCount() > 0
-            && classification
+            && SUPPORTED_CHART_TYPES.contains(classification
                 .getPredictedClasses(0)
                 .getClassName()
-                .toLowerCase(java.util.Locale.ROOT)
-                .contains("chart")) {
+                .toLowerCase(java.util.Locale.ROOT))) {
           return true;
         }
       }
@@ -146,12 +194,17 @@ public final class ItemSelector {
   }
 
   /** Area ratio of the picture's first provenance box to its page. Pictures
-   * without provenance or a known page size count as full-page (ratio 1). */
+   * without provenance or a known page size count as full-page (ratio 1).
+   * An unset (zero) threshold means Docling's default 0.05; a negative value
+   * disables the threshold entirely. */
   private static boolean passesArea(
       PictureItem picture, Document document, EnrichOptions options) {
     double threshold = options.getPictureDescriptionAreaThreshold();
-    if (threshold <= 0.0) {
+    if (threshold < 0.0) {
       return true;
+    }
+    if (threshold == 0.0) {
+      threshold = DEFAULT_AREA_THRESHOLD;
     }
     if (picture.getProvCount() == 0) {
       return true;
@@ -171,20 +224,29 @@ public final class ItemSelector {
     return area / pageArea >= threshold;
   }
 
-  /** Resolves image bytes for a picture: an ItemImage crop wins, then an
-   * inline data URI on the item's ImageRef. Anything else is null (skipped). */
+  /** Resolves image bytes for an item: an ItemImage crop wins, then an inline
+   * data URI on the item's ImageRef. Anything else is null (skipped). */
   private static String imageDataUri(
-      PictureItem picture, String selfRef, Map<String, ItemImage> crops) {
-    ItemImage crop = crops.get(selfRef);
+      ai.pipestream.document.v1.ImageRef imageRef, String selfRef, Map<String, ItemImage> crops) {
+    String crop = cropDataUri(selfRef, crops);
     if (crop != null) {
-      String mime = crop.getMimetype().isEmpty() ? "image/png" : crop.getMimetype();
-      return "data:" + mime + ";base64," + Base64.getEncoder().encodeToString(
-          crop.getData().toByteArray());
+      return crop;
     }
-    if (picture.hasImage() && picture.getImage().getUri().startsWith("data:")) {
-      return picture.getImage().getUri();
+    if (imageRef != null && imageRef.getUri().startsWith("data:")) {
+      return imageRef.getUri();
     }
     return null;
+  }
+
+  /** The ItemImage crop for a self_ref as a data URI, or null when absent. */
+  private static String cropDataUri(String selfRef, Map<String, ItemImage> crops) {
+    ItemImage crop = crops.get(selfRef);
+    if (crop == null) {
+      return null;
+    }
+    String mime = crop.getMimetype().isEmpty() ? "image/png" : crop.getMimetype();
+    return "data:" + mime + ";base64,"
+        + Base64.getEncoder().encodeToString(crop.getData().toByteArray());
   }
 
   private static ItemSkipped imageSkip(PictureItem picture, String selfRef) {
@@ -203,6 +265,15 @@ public final class ItemSelector {
         .setReason(reason)
         .setDetail(detail)
         .build();
+  }
+
+  /** Docling's per-preset description prompt; the SmolVLM prompt is Docling's
+   * default for any other (raw) model. */
+  private static String describePrompt(EnrichOptions options) {
+    return switch (options.getPictureDescriptionPreset()) {
+      case PICTURE_DESCRIPTION_PRESET_GRANITE_VISION -> DESCRIBE_PROMPT_GRANITE_VISION;
+      default -> DESCRIBE_PROMPT_SMOLVLM;
+    };
   }
 
   private static String descriptionModel(EnrichOptions options) {

@@ -76,8 +76,9 @@ message EnrichOptions {
   string picture_description_preset_raw = 3;
   // Minimum picture area as a fraction of its page's area, below which the
   // picture is skipped for description (SKIP_REASON_BELOW_AREA_THRESHOLD).
-  // Zero disables the threshold. Pictures without provenance or a known page
-  // size are treated as full-page and always pass.
+  // Zero (unset) applies Docling's default of 0.05; a negative value disables
+  // the threshold entirely. Pictures without provenance or a known page size
+  // are treated as full-page and always pass.
   double picture_description_area_threshold = 4;
   // Extract chart data from chart-classified pictures as a typed table.
   bool do_chart_extraction = 5;

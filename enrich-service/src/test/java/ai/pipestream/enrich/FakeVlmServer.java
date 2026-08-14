@@ -16,13 +16,14 @@ import java.util.function.Function;
 /**
  * An in-process fake of an OpenAI-compatible VLM endpoint. Tests configure
  * what content it returns (optionally per request), whether it gates
- * responses on a latch (to prove streaming), or whether it answers 500.
- * Records every request so tests can assert the model name and that image
- * bytes rode along.
+ * responses on a latch (to prove streaming), or what status it answers with
+ * (fixed or per 1-based call index). Records every request so tests can
+ * assert the model name, that image bytes rode along, and the attempt count.
  */
 final class FakeVlmServer implements AutoCloseable {
 
-  record RecordedRequest(String model, boolean hasImage, String body) {}
+  record RecordedRequest(String model, boolean hasImage, int maxTokens, String prompt,
+      String body) {}
 
   private final HttpServer server;
   private final java.util.concurrent.ExecutorService executor =
@@ -37,6 +38,9 @@ final class FakeVlmServer implements AutoCloseable {
   Map<Integer, CountDownLatch> gates = Map.of();
   /** When non-200, every request fails with this status. */
   int status = 200;
+  /** Per-call status override (1-based call index → HTTP status); defaults to
+   * {@link #status} so transient failures can be scripted. */
+  Function<Integer, Integer> statusForCall = call -> status;
 
   FakeVlmServer() {
     try {
@@ -57,14 +61,15 @@ final class FakeVlmServer implements AutoCloseable {
         }
       }
       byte[] response;
-      if (status != 200) {
+      int code = statusForCall.apply(call);
+      if (code != 200) {
         response = "{\"error\":{\"message\":\"model unavailable\"}}".getBytes(StandardCharsets.UTF_8);
       } else {
         response = ("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":"
                 + Json.quote(responder.apply(body)) + "}}]}")
             .getBytes(StandardCharsets.UTF_8);
       }
-      exchange.sendResponseHeaders(status, response.length);
+      exchange.sendResponseHeaders(code, response.length);
       try (OutputStream out = exchange.getResponseBody()) {
         out.write(response);
       }
@@ -76,15 +81,28 @@ final class FakeVlmServer implements AutoCloseable {
   private synchronized void record(String body) {
     String model = "";
     boolean hasImage = false;
+    int maxTokens = 0;
+    String prompt = "";
     try {
       Map<String, Object> root = Json.asObject(Json.parse(body));
       Object modelValue = root.get("model");
       model = modelValue instanceof String ? (String) modelValue : "";
+      Object maxTokensValue = root.get("max_tokens");
+      maxTokens = maxTokensValue instanceof Number ? ((Number) maxTokensValue).intValue() : 0;
       hasImage = body.contains("\"image_url\"");
+      List<Object> messages = Json.asArray(root.get("messages"));
+      List<Object> content = Json.asArray(Json.asObject(messages.get(0)).get("content"));
+      for (Object part : content) {
+        Map<String, Object> partMap = Json.asObject(part);
+        if ("text".equals(partMap.get("type"))) {
+          prompt = Json.asString(partMap.get("text"));
+          break;
+        }
+      }
     } catch (RuntimeException ignored) {
       // The record is diagnostic; a parse failure must not fail the test here.
     }
-    requests.add(new RecordedRequest(model, hasImage, body));
+    requests.add(new RecordedRequest(model, hasImage, maxTokens, prompt, body));
   }
 
   String url() {

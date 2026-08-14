@@ -1,12 +1,17 @@
 package ai.pipestream.enrich.vlm;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 /**
  * VLM client for any OpenAI-compatible chat-completions endpoint (llama.cpp's
@@ -14,47 +19,120 @@ import java.util.Map;
  * {@code http://vlm:8080}; the request goes to
  * {@code <endpoint>/v1/chat/completions} unless the endpoint already ends with
  * that path.
+ *
+ * <p>Retry behavior mirrors Docling's {@code api_image_request} (urllib3
+ * {@code Retry(total=5, connect=5, read=0, backoff_factor=0.1,
+ * status_forcelist=(429, 500, 502, 503, 504))}): up to 5 retries on those
+ * statuses and on connection-level failures (a starting vLLM endpoint commonly
+ * drops connections), with exponential backoff of 0.1s, 0.2s, 0.4s, 0.8s, 1.6s,
+ * honoring a {@code Retry-After} header when present. Other 4xx, per-request
+ * timeouts, and unparseable 200 bodies are not retried. The caller's timeout
+ * still bounds each attempt (as it does in Docling, where the timeout is
+ * per-request too); retries can add up to 5 extra attempts plus ~3.1s of
+ * backoff on top of one timed-out attempt.
  */
 public final class OpenAiCompatVlmClient implements VlmClient {
 
   private static final String COMPLETIONS_PATH = "/v1/chat/completions";
+  private static final int MAX_RETRIES = 5;
+  private static final Duration DEFAULT_BASE_BACKOFF = Duration.ofMillis(100);
+  private static final Set<Integer> RETRYABLE_STATUSES = Set.of(429, 500, 502, 503, 504);
 
   private final String completionsUrl;
   private final HttpClient http;
+  private final Duration baseBackoff;
 
   public OpenAiCompatVlmClient(String endpoint) {
+    this(endpoint, DEFAULT_BASE_BACKOFF);
+  }
+
+  /** Test seam: {@code baseBackoff} shrinks the retry waits. */
+  public OpenAiCompatVlmClient(String endpoint, Duration baseBackoff) {
     String trimmed = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
     this.completionsUrl =
         trimmed.endsWith(COMPLETIONS_PATH) ? trimmed : trimmed + COMPLETIONS_PATH;
     this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    this.baseBackoff = baseBackoff;
   }
 
   @Override
-  public String complete(String model, String prompt, String imageDataUri, Duration timeout)
+  public String complete(String model, String prompt, String imageDataUri, int maxTokens,
+      Duration timeout)
       throws VlmException {
     HttpRequest request =
         HttpRequest.newBuilder(URI.create(completionsUrl))
             .timeout(timeout)
             .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(requestBody(model, prompt, imageDataUri)))
+            .POST(HttpRequest.BodyPublishers.ofString(
+                requestBody(model, prompt, imageDataUri, maxTokens)))
             .build();
-    final HttpResponse<String> response;
-    try {
-      response = http.send(request, HttpResponse.BodyHandlers.ofString());
-    } catch (InterruptedException interrupt) {
-      Thread.currentThread().interrupt();
-      throw new VlmException("interrupted waiting for the VLM endpoint", interrupt);
-    } catch (Exception failure) {
-      throw new VlmException("VLM endpoint call failed: " + failure.getMessage(), failure);
+    for (int attempt = 0; ; attempt++) {
+      final HttpResponse<String> response;
+      try {
+        response = http.send(request, HttpResponse.BodyHandlers.ofString());
+      } catch (InterruptedException interrupt) {
+        Thread.currentThread().interrupt();
+        throw new VlmException("interrupted waiting for the VLM endpoint", interrupt);
+      } catch (IOException failure) {
+        if (attempt < MAX_RETRIES && isRetryable(failure)) {
+          sleep(backoff(attempt));
+          continue;
+        }
+        throw new VlmException("VLM endpoint call failed: " + failure.getMessage(), failure);
+      } catch (Exception failure) {
+        throw new VlmException("VLM endpoint call failed: " + failure.getMessage(), failure);
+      }
+      if (response.statusCode() != 200) {
+        if (attempt < MAX_RETRIES && RETRYABLE_STATUSES.contains(response.statusCode())) {
+          sleep(retryAfter(response).orElse(backoff(attempt)));
+          continue;
+        }
+        throw new VlmException(
+            "VLM endpoint answered HTTP " + response.statusCode() + ": "
+                + snippet(response.body()));
+      }
+      return extractContent(response.body());
     }
-    if (response.statusCode() != 200) {
-      throw new VlmException(
-          "VLM endpoint answered HTTP " + response.statusCode() + ": " + snippet(response.body()));
-    }
-    return extractContent(response.body());
   }
 
-  private static String requestBody(String model, String prompt, String imageDataUri) {
+  /**
+   * Connection-level failures (refused, reset, connect timeout) are retryable,
+   * like Docling's {@code connect=5}; a per-request read timeout is not, like
+   * Docling's {@code read=0}.
+   */
+  private static boolean isRetryable(IOException failure) {
+    return !(failure instanceof HttpTimeoutException)
+        || failure instanceof HttpConnectTimeoutException;
+  }
+
+  /** Docling parity: backoff_factor * 2^attempt → 0.1s, 0.2s, 0.4s, 0.8s, 1.6s. */
+  private Duration backoff(int attempt) {
+    return Duration.ofMillis(baseBackoff.toMillis() << attempt);
+  }
+
+  private static Optional<Duration> retryAfter(HttpResponse<?> response) {
+    Optional<String> header = response.headers().firstValue("Retry-After");
+    if (header.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(Duration.ofSeconds(Long.parseLong(header.get().trim())));
+    } catch (NumberFormatException ignored) {
+      return Optional.empty();
+    }
+  }
+
+  private static void sleep(Duration delay) throws VlmException {
+    try {
+      Thread.sleep(delay);
+    } catch (InterruptedException interrupt) {
+      Thread.currentThread().interrupt();
+      throw new VlmException("interrupted backing off from the VLM endpoint", interrupt);
+    }
+  }
+
+  private static String requestBody(String model, String prompt, String imageDataUri,
+      int maxTokens) {
     StringBuilder body = new StringBuilder(256 + prompt.length());
     body.append('{');
     if (model != null && !model.isEmpty()) {
@@ -67,7 +145,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
           .append(Json.quote(imageDataUri))
           .append("}}");
     }
-    body.append("]}],\"max_tokens\":1024}");
+    body.append("]}],\"max_tokens\":").append(maxTokens).append('}');
     return body.toString();
   }
 

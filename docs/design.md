@@ -75,13 +75,19 @@ points `ENRICH_VLM_URL` at a server that already has the weights.
 
 ## 5. Item selection
 
-- Pictures: area ≥ threshold, has an `ImageRef` with bytes or a
+- Pictures: area ≥ threshold (default 0.05 of the page, Docling's
+  default; negative disables), has an `ImageRef` with bytes or a
   resolvable URI the server is configured to fetch (default: inline
   only, no outbound HTTP).
-- Charts: picture whose figure-class top label is a chart **or**
-  `do_chart_extraction` on all pictures (Docling's broader mode).
+- Charts: picture whose figure-class top prediction is a Docling
+  supported chart type (`bar_chart` / `pie_chart` / `line_chart`) or
+  whose label is `CHART` (our addition over Docling).
 - Code/formula: `TextItem.label` already `CODE` / `FORMULA`, or
-  layout label from gRParse. We do not re-run layout.
+  layout label from gRParse. We do not re-run layout. The VLM call
+  sends the item's image crop with Docling's bare `<code>` /
+  `<formula>` prompt when a crop is available, else a text-only
+  fallback; output is post-processed Docling-style (sentinel strip,
+  `<_language_>` token → `code_language`).
 
 ## 6. Tests
 
@@ -92,3 +98,5 @@ points `ENRICH_VLM_URL` at a server that already has the weights.
   a CSV string as the only representation (CSV may additionally ride
   in an annotation).
 - VLM endpoint down → items skipped with reason, not a process crash.
+  Transient failures (HTTP 429/500/502/503/504 and connection drops) are
+  retried first — 5 retries, exponential backoff from 0.1s, Docling parity.

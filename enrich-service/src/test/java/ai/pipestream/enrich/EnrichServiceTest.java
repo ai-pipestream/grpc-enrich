@@ -9,11 +9,15 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import ai.pipestream.document.v1.BoundingBox;
 import ai.pipestream.document.v1.CodeItem;
+import ai.pipestream.document.v1.CodeLanguageLabel;
 import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.document.v1.FormulaItem;
 import ai.pipestream.document.v1.ImageRef;
 import ai.pipestream.document.v1.PageItem;
+import ai.pipestream.document.v1.PictureAnnotation;
+import ai.pipestream.document.v1.PictureClassificationClass;
+import ai.pipestream.document.v1.PictureClassificationData;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.ProvenanceItem;
 import ai.pipestream.document.v1.Size;
@@ -27,6 +31,7 @@ import ai.pipestream.enrich.v1.EnrichDocumentResponse;
 import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.v1.EnrichServiceGrpc;
 import ai.pipestream.enrich.v1.ItemAnnotation;
+import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.PictureDescriptionPreset;
 import ai.pipestream.enrich.v1.SkipReason;
@@ -113,7 +118,8 @@ class EnrichServiceTest {
       String defaultEndpoint, long maxDocumentBytes) throws Exception {
     String name = InProcessServerBuilder.generateName();
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-    EnrichmentEngine engine = new EnrichmentEngine(OpenAiCompatVlmClient::new, defaultEndpoint,
+    EnrichmentEngine engine = new EnrichmentEngine(
+        endpoint -> new OpenAiCompatVlmClient(endpoint, Duration.ofMillis(5)), defaultEndpoint,
         4, 16, Duration.ofSeconds(10), executor);
     EnrichServiceImpl service =
         new EnrichServiceImpl(maxDocumentBytes, engine, executor, defaultEndpoint, 16);
@@ -349,6 +355,25 @@ class EnrichServiceTest {
       assertNull(result.error());
       assertEquals(1, skips(result).size());
       assertEquals(SkipReason.SKIP_REASON_VLM_ERROR, skips(result).get(0).getReason());
+      assertEquals(6, vlm.requests.size(), "persistent 500 is retried 5 times, then skipped");
+    }
+  }
+
+  @Test
+  void vlmTransientError_retriesAndSucceeds() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.statusForCall = call -> call == 1 ? 503 : 200;
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setDocument(documentOnePictureOneParagraph())
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertNull(result.error());
+      assertTrue(skips(result).isEmpty());
+      assertEquals(1, annotations(result).size());
+      assertEquals(2, vlm.requests.size(), "a transient 503 is retried and the item enriches");
     }
   }
 
@@ -392,8 +417,126 @@ class EnrichServiceTest {
       assertEquals("x^2 + y^2 = z^2", formula.getFormula().getText());
       assertEquals(2, result.events().get(result.events().size() - 1)
           .getComplete().getSucceeded());
-      // Text-only enrichment sends no image.
-      assertFalse(vlm.requests.get(0).hasImage());
+      // Text-only enrichment sends no image, keeps the existing text in the
+      // prompt, and uses Docling's code/formula generation budget.
+      assertEquals(2, vlm.requests.size());
+      for (var request : vlm.requests) {
+        assertFalse(request.hasImage());
+        assertEquals(2048, request.maxTokens());
+      }
+      assertTrue(vlm.requests.stream()
+          .anyMatch(r -> r.prompt().contains("print( 'hi' )")));
+      assertTrue(vlm.requests.stream()
+          .anyMatch(r -> r.prompt().contains("x2+y2=z2")));
+    }
+  }
+
+  @Test
+  void codeWithCrop_barePromptImageLanguageToken() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "<_Python_>print('hi')</code><end_of_utterance>extra";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      Document document = Document.newBuilder()
+          .setName("test")
+          .addTexts(ai.pipestream.document.v1.BaseTextItem.newBuilder()
+              .setCode(CodeItem.newBuilder()
+                  .setSelfRef("#/texts/0")
+                  .setLabel(DocItemLabel.DOC_ITEM_LABEL_CODE)
+                  .setText("print( 'hi' )")))
+          .build();
+      Collected result = runRpc(stub, List.of(
+          optionsRequest(EnrichOptions.newBuilder().setDoCodeEnrichment(true).build()),
+          EnrichDocumentRequest.newBuilder()
+              .setImage(ItemImage.newBuilder()
+                  .setSelfRef("#/texts/0")
+                  .setMimetype("image/png")
+                  .setData(ByteString.copyFrom(PNG_BYTES)))
+              .build(),
+          EnrichDocumentRequest.newBuilder()
+              .setChunk(DocumentChunk.newBuilder()
+                  .setData(document.toByteString())
+                  .setComplete(true))
+              .build()));
+
+      assertNull(result.error(), "RPC must be OK: " + result.error());
+      // Docling sends the image crop with the bare prompt "<code>".
+      assertEquals(1, vlm.requests.size());
+      assertTrue(vlm.requests.get(0).hasImage());
+      assertEquals("<code>", vlm.requests.get(0).prompt());
+      assertEquals(2048, vlm.requests.get(0).maxTokens());
+      // Output post-processing: language token out, sentinels stripped.
+      assertEquals(1, annotations(result).size());
+      var code = annotations(result).get(0).getCode();
+      assertEquals("print('hi')", code.getText());
+      assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON, code.getLanguage());
+      assertEquals("Python", code.getLanguageRaw());
+    }
+  }
+
+  @Test
+  void formulaWithCrop_barePromptAndPostProcessing() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder =
+          body -> "<loc_0><loc_0><loc_500><loc_500>x^2 + y^2</formula><end_of_utterance>";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      Document document = Document.newBuilder()
+          .setName("test")
+          .addTexts(ai.pipestream.document.v1.BaseTextItem.newBuilder()
+              .setFormula(FormulaItem.newBuilder()
+                  .setBase(TextItemBase.newBuilder()
+                      .setSelfRef("#/texts/0")
+                      .setLabel(DocItemLabel.DOC_ITEM_LABEL_FORMULA)
+                      .setText("x2+y2"))))
+          .build();
+      Collected result = runRpc(stub, List.of(
+          optionsRequest(EnrichOptions.newBuilder().setDoFormulaEnrichment(true).build()),
+          EnrichDocumentRequest.newBuilder()
+              .setImage(ItemImage.newBuilder()
+                  .setSelfRef("#/texts/0")
+                  .setMimetype("image/png")
+                  .setData(ByteString.copyFrom(PNG_BYTES)))
+              .build(),
+          EnrichDocumentRequest.newBuilder()
+              .setChunk(DocumentChunk.newBuilder()
+                  .setData(document.toByteString())
+                  .setComplete(true))
+              .build()));
+
+      assertNull(result.error(), "RPC must be OK: " + result.error());
+      assertEquals(1, vlm.requests.size());
+      assertTrue(vlm.requests.get(0).hasImage());
+      assertEquals("<formula>", vlm.requests.get(0).prompt());
+      assertEquals(2048, vlm.requests.get(0).maxTokens());
+      assertEquals("x^2 + y^2", annotations(result).get(0).getFormula().getText());
+    }
+  }
+
+  @Test
+  void returnDocument_setsCodeLanguage() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "<_Java_>int x = 1;";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      Document document = Document.newBuilder()
+          .setName("test")
+          .addTexts(ai.pipestream.document.v1.BaseTextItem.newBuilder()
+              .setCode(CodeItem.newBuilder()
+                  .setSelfRef("#/texts/0")
+                  .setLabel(DocItemLabel.DOC_ITEM_LABEL_CODE)
+                  .setText("int  x=1")))
+          .build();
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoCodeEnrichment(true)
+          .setReturnDocument(true)
+          .setDocument(document)
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertNull(result.error());
+      var patched = result.events().get(result.events().size() - 1)
+          .getComplete().getDocument().getTexts(0).getCode();
+      assertEquals("int x = 1;", patched.getText());
+      assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_JAVA, patched.getCodeLanguage());
+      assertEquals("Java", patched.getCodeLanguageRaw());
     }
   }
 
@@ -426,6 +569,166 @@ class EnrichServiceTest {
       assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
           skips(result).get(0).getReason());
       assertTrue(vlm.requests.isEmpty());
+    }
+  }
+
+  /** A picture covering ~4% of its page on a 1000x1000 page. */
+  private static Document documentWithSmallPicture(double bboxExtent) {
+    return Document.newBuilder()
+        .setName("test")
+        .addPictures(pictureWithImage("#/pictures/0").toBuilder()
+            .addProv(ProvenanceItem.newBuilder()
+                .setPageNo(1)
+                .setBbox(BoundingBox.newBuilder()
+                    .setL(0).setT(0).setR(bboxExtent).setB(bboxExtent)))
+            .build())
+        .putPages(1, PageItem.newBuilder()
+            .setPageNo(1)
+            .setSize(Size.newBuilder().setWidth(1000).setHeight(1000))
+            .build())
+        .build();
+  }
+
+  @Test
+  void defaultAreaThreshold_docling005() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "big enough";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      // 200x200 on a 1000x1000 page = 4% < Docling's default 0.05: skipped
+      // even though no threshold was set explicitly.
+      EnrichOptions small = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setDocument(documentWithSmallPicture(200))
+          .build();
+      Collected skippedResult = runRpc(stub, List.of(optionsRequest(small)));
+      assertNull(skippedResult.error());
+      assertEquals(1, skips(skippedResult).size());
+      assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
+          skips(skippedResult).get(0).getReason());
+      assertTrue(vlm.requests.isEmpty());
+
+      // 300x300 = 9% >= 0.05: described.
+      EnrichOptions big = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setDocument(documentWithSmallPicture(300))
+          .build();
+      Collected describedResult = runRpc(stub, List.of(optionsRequest(big)));
+      assertNull(describedResult.error());
+      assertEquals(1, annotations(describedResult).size());
+    }
+  }
+
+  @Test
+  void negativeAreaThreshold_disables() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "tiny but described";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setPictureDescriptionAreaThreshold(-1)
+          .setDocument(documentWithSmallPicture(200))
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertNull(result.error());
+      assertTrue(skips(result).isEmpty());
+      assertEquals(1, annotations(result).size());
+    }
+  }
+
+  private static PictureItem classifiedPicture(String selfRef, String topClass) {
+    return pictureWithImage(selfRef).toBuilder()
+        .addAnnotations(PictureAnnotation.newBuilder()
+            .setClassification(PictureClassificationData.newBuilder()
+                .setKind("classification")
+                .addPredictedClasses(PictureClassificationClass.newBuilder()
+                    .setClassName(topClass)
+                    .setConfidence(0.9))))
+        .build();
+  }
+
+  @Test
+  void chartGate_supportedTopPrediction() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "year,sales\n2023,10";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      // Label is PICTURE; the top classification prediction is a Docling
+      // supported chart type, so chart extraction runs.
+      Document document = Document.newBuilder().setName("test")
+          .addPictures(classifiedPicture("#/pictures/0", "bar_chart"))
+          .build();
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoChartExtraction(true)
+          .setChartPreset(ChartPreset.CHART_PRESET_GRANITE_VISION_CHART2CSV)
+          .setDocument(document)
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertNull(result.error());
+      assertEquals(1, result.events().get(0).getStarted().getChartExtractions());
+      assertEquals(1, annotations(result).size());
+      assertTrue(annotations(result).get(0).hasChartTable());
+      assertEquals(1, vlm.requests.size());
+      // Docling's exact chart prompt and the chart generation budget.
+      assertEquals("Convert the information in this chart into a data table in CSV format.",
+          vlm.requests.get(0).prompt());
+      assertEquals(4096, vlm.requests.get(0).maxTokens());
+    }
+  }
+
+  @Test
+  void chartGate_unsupportedTopPrediction_notAChart() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "a scatter plot";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      // "scatter_chart" contains "chart" but is not in Docling's
+      // SUPPORTED_CHART_TYPES: no chart job, description runs instead.
+      Document document = Document.newBuilder().setName("test")
+          .addPictures(classifiedPicture("#/pictures/0", "scatter_chart"))
+          .build();
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoChartExtraction(true)
+          .setDoPictureDescription(true)
+          .setDocument(document)
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertNull(result.error());
+      assertEquals(0, result.events().get(0).getStarted().getChartExtractions());
+      assertEquals(1, result.events().get(0).getStarted().getPictureDescriptions());
+      assertEquals(1, annotations(result).size());
+      assertTrue(annotations(result).get(0).hasDescription());
+    }
+  }
+
+  @Test
+  void presetPrompts_matchDocling() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "caption";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+
+      EnrichOptions smolvlm = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setPictureDescriptionPreset(
+              PictureDescriptionPreset.PICTURE_DESCRIPTION_PRESET_SMOLVLM)
+          .setDocument(documentOnePictureOneParagraph())
+          .build();
+      Collected smolvlmResult = runRpc(stub, List.of(optionsRequest(smolvlm)));
+      assertNull(smolvlmResult.error());
+      assertEquals("Describe this image in a few sentences.",
+          vlm.requests.get(vlm.requests.size() - 1).prompt());
+      assertEquals(200, vlm.requests.get(vlm.requests.size() - 1).maxTokens());
+
+      EnrichOptions granite = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setPictureDescriptionPreset(
+              PictureDescriptionPreset.PICTURE_DESCRIPTION_PRESET_GRANITE_VISION)
+          .setDocument(documentOnePictureOneParagraph())
+          .build();
+      Collected graniteResult = runRpc(stub, List.of(optionsRequest(granite)));
+      assertNull(graniteResult.error());
+      assertEquals("What is shown in this image?",
+          vlm.requests.get(vlm.requests.size() - 1).prompt());
     }
   }
 
