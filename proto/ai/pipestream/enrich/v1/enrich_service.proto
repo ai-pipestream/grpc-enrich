@@ -1,0 +1,324 @@
+// grpc-enrich wire contract: a gRParse Document in, a live stream of typed
+// item annotations out, keyed by self_ref. Picture describe, chart-to-table
+// extraction, and code/formula enrichment are produced by calling a remote
+// VLM server (llama.cpp, OVMS, or any OpenAI-compatible endpoint); no model
+// weights live in this process.
+syntax = "proto3";
+
+package ai.pipestream.enrich.v1;
+
+import "ai/pipestream/document/v1/document.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "EnrichServiceProto";
+option java_package = "ai.pipestream.enrich.v1";
+
+// EnrichService annotates items that already exist on a parsed Document:
+// pictures, charts, code blocks, and formulas. Parse stays in gRParse /
+// grpc-vlm-convert; this service never creates layout, OCR, or page images.
+//
+// The product is the live event stream: EnrichStarted first (item counts
+// selected), then one ItemAnnotation or ItemSkipped per item as that item's
+// VLM call returns, then exactly one EnrichComplete as the trailer. A UI can
+// paint captions on already-parsed figures while later pictures are still in
+// flight. Events may be emitted before the client has finished sending when
+// the first request message carries a complete inline Document; per-item
+// events are never buffered into a single batch.
+//
+// Error model: a stream whose first message is not EnrichOptions, or that
+// ends without any document, is INVALID_ARGUMENT. Assembled DocumentChunk
+// bytes above the server's byte cap are RESOURCE_EXHAUSTED. Chunk bytes that
+// do not parse as a Document are INVALID_ARGUMENT. A failed VLM call is NOT
+// an RPC error: the item is reported as ItemSkipped with reason
+// SKIP_REASON_VLM_ERROR and the remaining items continue.
+service EnrichService {
+  // Enriches one document. The client sends exactly one EnrichOptions message
+  // first (carrying the document inline, or followed by DocumentChunk
+  // messages for large documents and ItemImage messages for stripped crops),
+  // then half-closes. When the document is inline and complete, enrichment
+  // starts immediately; when it arrives as chunks, the client must send any
+  // ItemImage crops before the chunk marked complete, because enrichment
+  // starts when that chunk arrives.
+  rpc EnrichDocument(stream EnrichDocumentRequest) returns (stream EnrichDocumentResponse);
+  // Reports server identity and operational limits: versions, the configured
+  // default VLM endpoint, the document byte cap, and the VLM concurrency cap.
+  // Intended for capability discovery by orchestrators and LLM tool facades.
+  rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
+}
+
+// One client-stream message. The first message on the stream must carry
+// options; chunk and image messages follow it in any order (images before the
+// completing chunk when the document is chunked).
+message EnrichDocumentRequest {
+  // The request payload: exactly one variant per message.
+  oneof request {
+    // Enrichment options and, optionally, the complete inline Document.
+    // Required as the first message on the stream.
+    EnrichOptions options = 1;
+    // One slice of a serialized Document for documents too large to inline.
+    DocumentChunk chunk = 2;
+    // Image bytes for one item, sent separately when the caller strips image
+    // bytes from the document. Keyed by the item's self_ref.
+    ItemImage image = 3;
+  }
+}
+
+// What to enrich and how. Mirrors Docling's enrichment flags without the
+// Python unions: booleans plus enum presets, with *_raw fallbacks for model
+// names this schema does not know.
+message EnrichOptions {
+  // Annotate selected pictures with a VLM-generated description.
+  bool do_picture_description = 1;
+  // Which picture-description model family to ask the endpoint for.
+  PictureDescriptionPreset picture_description_preset = 2;
+  // Raw model name for the picture-description call when the enum is
+  // PICTURE_DESCRIPTION_PRESET_UNSPECIFIED. Passed through to the endpoint.
+  string picture_description_preset_raw = 3;
+  // Minimum picture area as a fraction of its page's area, below which the
+  // picture is skipped for description (SKIP_REASON_BELOW_AREA_THRESHOLD).
+  // Zero disables the threshold. Pictures without provenance or a known page
+  // size are treated as full-page and always pass.
+  double picture_description_area_threshold = 4;
+  // Extract chart data from chart-classified pictures as a typed table.
+  bool do_chart_extraction = 5;
+  // Which chart-extraction model family to ask the endpoint for.
+  ChartPreset chart_preset = 6;
+  // Raw model name for the chart-extraction call when the enum is
+  // CHART_PRESET_UNSPECIFIED. Passed through to the endpoint.
+  string chart_preset_raw = 7;
+  // Annotate code items (Document texts carrying a CodeItem).
+  bool do_code_enrichment = 8;
+  // Annotate formula items (Document texts carrying a FormulaItem).
+  bool do_formula_enrichment = 9;
+  // Which code/formula model family to ask the endpoint for.
+  CodeFormulaPreset code_formula_preset = 10;
+  // Raw model name for the code/formula call when the enum is
+  // CODE_FORMULA_PRESET_UNSPECIFIED. Passed through to the endpoint.
+  string code_formula_preset_raw = 11;
+  // Per-request override of the VLM endpoint URL. When empty the server's
+  // configured default (ENRICH_VLM_URL) is used.
+  string vlm_endpoint = 12;
+  // Maximum number of VLM calls in flight for this request. Zero uses the
+  // server's configured default; values above the server cap are clamped.
+  uint32 concurrency = 13;
+  // Per-VLM-call timeout in seconds. Zero uses the server's configured
+  // default.
+  uint32 timeout_seconds = 14;
+  // When true, EnrichComplete carries a full copy of the document with the
+  // emitted annotations applied. Unary convenience only; the event stream is
+  // the real API and patch application is normally the caller's job.
+  bool return_document = 15;
+  // The complete document to enrich, when it fits in one message. Absent
+  // means the document follows as DocumentChunk messages.
+  ai.pipestream.document.v1.Document document = 16;
+}
+
+// One slice of a serialized ai.pipestream.document.v1.Document. Chunks are
+// concatenated in arrival order; complete must be set on the last one.
+message DocumentChunk {
+  // Serialized Document bytes for this slice.
+  bytes data = 1;
+  // True on the final chunk. Enrichment starts when this chunk arrives, so
+  // any ItemImage crops must have been sent already.
+  bool complete = 2;
+}
+
+// Image bytes for one enrichable item, for callers that strip image bytes
+// from the document before sending it.
+message ItemImage {
+  // Self-reference of the item these bytes belong to (for example
+  // "#/pictures/0").
+  string self_ref = 1;
+  // Raw image bytes (PNG, JPEG, whatever the VLM endpoint accepts).
+  bytes data = 2;
+  // MIME type of data, for example "image/png".
+  string mimetype = 3;
+}
+
+// One server-stream event. Order: started first, then annotation/skipped
+// events interleaved as VLM calls return (out-of-order across items is
+// legal), then exactly one complete as the final event.
+message EnrichDocumentResponse {
+  // The event payload: exactly one variant per message.
+  oneof event {
+    // First event of every enrichment: how many items were selected per job.
+    EnrichStarted started = 1;
+    // One item's annotation, emitted as that item's VLM call returns.
+    ItemAnnotation annotation = 2;
+    // One item that was not enriched, with the reason.
+    ItemSkipped skipped = 3;
+    // Trailer: final counts and, when requested, the annotated document.
+    EnrichComplete complete = 4;
+  }
+}
+
+// Counts of items selected for each enrichment job, before any VLM call runs.
+message EnrichStarted {
+  // Pictures selected for description.
+  uint32 picture_descriptions = 1;
+  // Pictures selected for chart extraction.
+  uint32 chart_extractions = 2;
+  // Code items selected for enrichment.
+  uint32 code_enrichments = 3;
+  // Formula items selected for enrichment.
+  uint32 formula_enrichments = 4;
+}
+
+// The annotation produced for one item, keyed by the item's self_ref so the
+// caller can patch a live document without buffering the whole result.
+message ItemAnnotation {
+  // Self-reference of the annotated item (for example "#/pictures/0").
+  string self_ref = 1;
+  // Name of the model that produced the annotation, as reported to or by the
+  // VLM endpoint.
+  string model = 2;
+  // The annotation payload; the variant identifies the enrichment job.
+  oneof annotation {
+    // A VLM-generated picture description.
+    PictureDescription description = 3;
+    // Chart data extracted from a picture as typed table cells.
+    ChartTable chart_table = 4;
+    // Enriched code text with a language label.
+    CodeAnnotation code = 5;
+    // Enriched formula text.
+    FormulaAnnotation formula = 6;
+  }
+}
+
+// A VLM-generated description of a picture.
+message PictureDescription {
+  // The description text.
+  string text = 1;
+  // The model's confidence in the description, 0.0 to 1.0, when the endpoint
+  // reports one.
+  optional double confidence = 2;
+}
+
+// Chart data extracted from a picture. The table is typed cells, never a CSV
+// string as the only representation; the raw CSV may additionally ride along
+// in csv for debugging.
+message ChartTable {
+  // Chart title when the model reported one.
+  string title = 1;
+  // The extracted table as typed cells (grid plus cell-level structure).
+  ai.pipestream.document.v1.TableData table = 2;
+  // The raw CSV the model returned, when it returned CSV.
+  string csv = 3;
+}
+
+// Enriched code text for a code item.
+message CodeAnnotation {
+  // The enriched code text (for example an OCR-refined transcription).
+  string text = 1;
+  // Detected or confirmed programming language.
+  ai.pipestream.document.v1.CodeLanguageLabel language = 2;
+  // Raw language string when the model names a language the enum does not
+  // know.
+  string language_raw = 3;
+}
+
+// Enriched formula text for a formula item.
+message FormulaAnnotation {
+  // The enriched formula text (for example a LaTeX transcription).
+  string text = 1;
+}
+
+// An item that was selected but could not be enriched. A skip never fails
+// the RPC; the remaining items continue.
+message ItemSkipped {
+  // Self-reference of the skipped item.
+  string self_ref = 1;
+  // Why the item was skipped.
+  SkipReason reason = 2;
+  // Human-readable detail (for example the VLM endpoint's error).
+  string detail = 3;
+}
+
+// Trailer event: final counts for the whole enrichment.
+message EnrichComplete {
+  // Items successfully annotated.
+  uint32 succeeded = 1;
+  // Items skipped (no image, below threshold, or VLM error).
+  uint32 skipped = 2;
+  // Items that failed unexpectedly outside the VLM call. Normally zero; a
+  // per-item failure that is not a clean skip lands here rather than failing
+  // the RPC.
+  uint32 failed = 3;
+  // The full document with the emitted annotations applied, present only
+  // when EnrichOptions.return_document was true. Picture descriptions and
+  // chart tables land in the picture's annotations list; code and formula
+  // items have their text replaced (orig is never rewritten). Provenance
+  // boxes are never touched.
+  optional ai.pipestream.document.v1.Document document = 4;
+}
+
+// Why an item was not enriched.
+enum SkipReason {
+  // Never emitted; the zero value required by proto3.
+  SKIP_REASON_UNSPECIFIED = 0;
+  // The item has no image bytes: no inline data URI and no ItemImage crop
+  // was supplied for its self_ref.
+  SKIP_REASON_NO_IMAGE = 1;
+  // The item's image is a non-data URI and the server is not configured to
+  // fetch external image URIs (the default; inline only, no outbound HTTP).
+  SKIP_REASON_UNFETCHABLE_URI = 2;
+  // The picture's area is below EnrichOptions.picture_description_area_threshold.
+  SKIP_REASON_BELOW_AREA_THRESHOLD = 3;
+  // The VLM call failed: endpoint unreachable, non-200 response, timeout, or
+  // an unparseable reply.
+  SKIP_REASON_VLM_ERROR = 4;
+}
+
+// Picture-description model families Docling names, served by the remote
+// endpoint. UNSPECIFIED plus picture_description_preset_raw addresses
+// whatever else the endpoint serves.
+enum PictureDescriptionPreset {
+  // No enum preset; picture_description_preset_raw (or the endpoint default)
+  // names the model.
+  PICTURE_DESCRIPTION_PRESET_UNSPECIFIED = 0;
+  // SmolVLM family (Docling's smolvlm_picture_description).
+  PICTURE_DESCRIPTION_PRESET_SMOLVLM = 1;
+  // Granite Vision family (Docling's granite_picture_description).
+  PICTURE_DESCRIPTION_PRESET_GRANITE_VISION = 2;
+}
+
+// Chart-extraction model families Docling names, served by the remote
+// endpoint. UNSPECIFIED plus chart_preset_raw addresses whatever else the
+// endpoint serves.
+enum ChartPreset {
+  // No enum preset; chart_preset_raw (or the endpoint default) names the
+  // model.
+  CHART_PRESET_UNSPECIFIED = 0;
+  // Granite Vision chart2csv: chart image to CSV table.
+  CHART_PRESET_GRANITE_VISION_CHART2CSV = 1;
+}
+
+// Code/formula model families Docling names, served by the remote endpoint.
+// UNSPECIFIED plus code_formula_preset_raw addresses whatever else the
+// endpoint serves.
+enum CodeFormulaPreset {
+  // No enum preset; code_formula_preset_raw (or the endpoint default) names
+  // the model.
+  CODE_FORMULA_PRESET_UNSPECIFIED = 0;
+  // CodeFormula V2 (Docling's code/formula enrichment model).
+  CODE_FORMULA_PRESET_CODE_FORMULA_V2 = 1;
+}
+
+// Empty request for capability discovery.
+message GetServiceInfoRequest {
+}
+
+// Server identity and operational limits, for capability discovery.
+message GetServiceInfoResponse {
+  // This server's version.
+  string service_version = 1;
+  // The wire API version, for example "v1".
+  string api_version = 2;
+  // The process-default VLM endpoint (ENRICH_VLM_URL), empty when
+  // unconfigured. Per-request EnrichOptions.vlm_endpoint overrides it.
+  string default_vlm_endpoint = 3;
+  // The byte cap on the assembled document (RESOURCE_EXHAUSTED above it).
+  uint64 max_document_bytes = 4;
+  // The server-wide cap on concurrent VLM calls per request.
+  uint32 max_concurrent_vlm_calls = 5;
+}

@@ -1,0 +1,21 @@
+[versions]
+grpc = "1.69.0"
+protobuf = "4.29.3"
+log4j = "2.24.3"
+junit = "5.11.4"
+protobufPlugin = "0.9.5"
+
+[libraries]
+grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
+grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
+grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
+grpc-services = { module = "io.grpc:grpc-services", version.ref = "grpc" }
+grpc-inprocess = { module = "io.grpc:grpc-inprocess", version.ref = "grpc" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+tomcat-annotations = { module = "org.apache.tomcat:annotations-api", version = "6.0.53" }
+log4j-core = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+
+[plugins]
+protobuf = { id = "com.google.protobuf", version.ref = "protobufPlugin" }

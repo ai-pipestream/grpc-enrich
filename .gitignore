@@ -4,3 +4,8 @@ target/
 .gradle/
 .idea/
 .cache/
+out/
+*.iml
+.classpath
+.project
+.settings/

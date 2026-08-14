@@ -1,0 +1,20 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  # Strictest built-in rule set plus mandatory documentation comments on
+  # every message, enum, enum value, field, oneof, rpc, and service.
+  # Comment ignores are disallowed: fix the proto, not the linter.
+  use:
+    - STANDARD
+    - COMMENTS
+  disallow_comment_ignores: true
+  ignore_only:
+    # The document schema is vendored for parity with the upstream JSON
+    # schema (canonical copy in the gRParse repo); its comment coverage
+    # follows that schema, not this repo's comment rule.
+    COMMENTS:
+      - proto/ai/pipestream/document/v1/document.proto
+breaking:
+  use:
+    - FILE
