@@ -195,15 +195,16 @@ public final class ItemSelector {
 
   /** Area ratio of the picture's first provenance box to its page. Pictures
    * without provenance or a known page size count as full-page (ratio 1).
-   * An unset (zero) threshold means Docling's default 0.05; a negative value
-   * disables the threshold entirely. */
+   * An unset (zero) or NaN threshold means Docling's default 0.05; a negative
+   * value disables the threshold entirely. */
   private static boolean passesArea(
       PictureItem picture, Document document, EnrichOptions options) {
     double threshold = options.getPictureDescriptionAreaThreshold();
     if (threshold < 0.0) {
       return true;
     }
-    if (threshold == 0.0) {
+    if (threshold == 0.0 || Double.isNaN(threshold)) {
+      // NaN would make every comparison false and silently skip everything.
       threshold = DEFAULT_AREA_THRESHOLD;
     }
     if (picture.getProvCount() == 0) {

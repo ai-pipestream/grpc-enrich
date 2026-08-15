@@ -25,7 +25,8 @@ import java.util.Set;
  * status_forcelist=(429, 500, 502, 503, 504))}): up to 5 retries on those
  * statuses and on connection-level failures (a starting vLLM endpoint commonly
  * drops connections), with exponential backoff of 0.1s, 0.2s, 0.4s, 0.8s, 1.6s,
- * honoring a {@code Retry-After} header when present. Other 4xx, per-request
+ * honoring a {@code Retry-After} header when present (clamped to the per-call
+ * timeout, so a hostile or buggy endpoint cannot park a worker for days). Other 4xx, per-request
  * timeouts, and unparseable 200 bodies are not retried. The caller's timeout
  * still bounds each attempt (as it does in Docling, where the timeout is
  * per-request too); retries can add up to 5 extra attempts plus ~3.1s of
@@ -84,7 +85,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       }
       if (response.statusCode() != 200) {
         if (attempt < MAX_RETRIES && RETRYABLE_STATUSES.contains(response.statusCode())) {
-          sleep(retryAfter(response).orElse(backoff(attempt)));
+          sleep(retryWait(response, attempt, timeout));
           continue;
         }
         throw new VlmException(
@@ -108,6 +109,17 @@ public final class OpenAiCompatVlmClient implements VlmClient {
   /** Docling parity: backoff_factor * 2^attempt → 0.1s, 0.2s, 0.4s, 0.8s, 1.6s. */
   private Duration backoff(int attempt) {
     return Duration.ofMillis(baseBackoff.toMillis() << attempt);
+  }
+
+  /** The wait before the next attempt: Retry-After when present and sane,
+   * else exponential backoff. Retry-After is clamped to the per-call timeout
+   * (a negative value is ignored): a hostile or buggy endpoint must not be
+   * able to park a worker thread for days by answering 429 with a huge
+   * Retry-After. */
+  private Duration retryWait(HttpResponse<?> response, int attempt, Duration timeout) {
+    Duration wait = retryAfter(response).filter(delay -> !delay.isNegative())
+        .orElse(backoff(attempt));
+    return wait.compareTo(timeout) > 0 ? timeout : wait;
   }
 
   private static Optional<Duration> retryAfter(HttpResponse<?> response) {

@@ -21,8 +21,6 @@ import ai.pipestream.enrich.v1.SkipReason;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
@@ -84,8 +82,7 @@ public final class EnrichmentEngine {
     AtomicInteger succeeded = new AtomicInteger();
     AtomicInteger skipped = new AtomicInteger();
     AtomicInteger failed = new AtomicInteger();
-    ConcurrentLinkedQueue<WorkItem> patches = new ConcurrentLinkedQueue<>();
-    ConcurrentLinkedQueue<ItemAnnotation> annotations = new ConcurrentLinkedQueue<>();
+    ConcurrentLinkedQueue<EnrichedItem> enriched = new ConcurrentLinkedQueue<>();
 
     for (ItemSkipped preskip : selection.skips()) {
       skipped.incrementAndGet();
@@ -95,12 +92,19 @@ public final class EnrichmentEngine {
     String endpoint = options.getVlmEndpoint().isEmpty()
         ? defaultEndpoint
         : options.getVlmEndpoint();
-    int concurrency = options.getConcurrency() == 0
+    // Both fields are uint32 on the wire; Java surfaces values above 2^31 as
+    // negative ints. A wrapped concurrency is above the cap, so clamp to it;
+    // a wrapped timeout must be widened back to its unsigned value or the
+    // negative Duration would fail every VLM call.
+    int requestedConcurrency = options.getConcurrency();
+    int concurrency = requestedConcurrency == 0
         ? defaultConcurrency
-        : Math.min(options.getConcurrency(), maxConcurrency);
+        : requestedConcurrency < 0
+            ? maxConcurrency
+            : Math.min(requestedConcurrency, maxConcurrency);
     Duration timeout = options.getTimeoutSeconds() == 0
         ? defaultTimeout
-        : Duration.ofSeconds(options.getTimeoutSeconds());
+        : Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
 
     if (!selection.work().isEmpty() && endpoint.isEmpty()) {
       for (WorkItem item : selection.work()) {
@@ -117,8 +121,7 @@ public final class EnrichmentEngine {
           try {
             slots.acquire();
             try {
-              runItem(client, item, timeout, emit, succeeded, skipped, failed, patches,
-                  annotations);
+              runItem(client, item, timeout, emit, succeeded, skipped, failed, enriched);
             } finally {
               slots.release();
             }
@@ -142,10 +145,15 @@ public final class EnrichmentEngine {
         .setSkipped(skipped.get())
         .setFailed(failed.get());
     if (options.getReturnDocument()) {
-      complete.setDocument(applyPatches(document, selection.work(), annotations));
+      complete.setDocument(applyPatches(document, enriched));
     }
     emit.accept(event(complete.build()));
   }
+
+  /** A work item paired with the annotation its own VLM call produced. The
+   * pairing (not the self_ref) keys patch application, so two items sharing
+   * a self_ref still each get their own annotation. */
+  private record EnrichedItem(WorkItem item, ItemAnnotation annotation) {}
 
   private static void runItem(
       VlmClient client,
@@ -155,8 +163,7 @@ public final class EnrichmentEngine {
       AtomicInteger succeeded,
       AtomicInteger skipped,
       AtomicInteger failed,
-      ConcurrentLinkedQueue<WorkItem> order,
-      ConcurrentLinkedQueue<ItemAnnotation> annotations) {
+      ConcurrentLinkedQueue<EnrichedItem> enriched) {
     try {
       String content =
           client.complete(item.model(), item.prompt(), item.imageDataUri(), item.maxTokens(),
@@ -182,8 +189,7 @@ public final class EnrichmentEngine {
       }
       ItemAnnotation built = annotation.build();
       succeeded.incrementAndGet();
-      order.add(item);
-      annotations.add(built);
+      enriched.add(new EnrichedItem(item, built));
       emit.accept(EnrichDocumentResponse.newBuilder().setAnnotation(built).build());
     } catch (VlmException vlm) {
       skipped.incrementAndGet();
@@ -197,17 +203,15 @@ public final class EnrichmentEngine {
   }
 
   /** Applies the emitted annotations to a copy of the document. Additive
-   * only: provenance boxes and orig text are never rewritten. */
+   * only: provenance boxes and orig text are never rewritten. Each patch
+   * lands on the item whose VLM call produced it, keyed by document index —
+   * not by self_ref, which pathological documents can duplicate. */
   private static Document applyPatches(
-      Document document, List<WorkItem> work, ConcurrentLinkedQueue<ItemAnnotation> annotations) {
-    Map<String, ItemAnnotation> byRef = new java.util.HashMap<>();
-    annotations.forEach(annotation -> byRef.put(annotation.getSelfRef(), annotation));
+      Document document, ConcurrentLinkedQueue<EnrichedItem> enriched) {
     Document.Builder patched = document.toBuilder();
-    for (WorkItem item : work) {
-      ItemAnnotation annotation = byRef.get(item.selfRef());
-      if (annotation == null) {
-        continue;
-      }
+    for (EnrichedItem result : enriched) {
+      WorkItem item = result.item();
+      ItemAnnotation annotation = result.annotation();
       switch (item.kind()) {
         case DESCRIPTION -> {
           PictureItem picture = patched.getPictures(item.pictureIndex());
