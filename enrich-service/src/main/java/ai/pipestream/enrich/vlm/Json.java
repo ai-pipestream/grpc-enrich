@@ -80,8 +80,14 @@ public final class Json {
   }
 
   private static final class Parser {
+    /** Nesting cap: a hostile or broken endpoint must not be able to kill the
+     * calling thread with a StackOverflowError. Far beyond anything the
+     * chat-completions wire legitimately carries. */
+    private static final int MAX_DEPTH = 512;
+
     private final String text;
     private int pos;
+    private int depth;
 
     Parser(String text) {
       this.text = text;
@@ -123,11 +129,13 @@ public final class Json {
     }
 
     private Map<String, Object> readObject() {
+      enterContainer();
       pos++; // '{'
       Map<String, Object> object = new LinkedHashMap<>();
       skipWhitespace();
       if (!atEnd() && text.charAt(pos) == '}') {
         pos++;
+        depth--;
         return object;
       }
       while (true) {
@@ -137,11 +145,15 @@ public final class Json {
         expect(':');
         object.put(key, readValue());
         skipWhitespace();
+        if (atEnd()) {
+          throw new IllegalArgumentException("unterminated JSON object");
+        }
         char c = text.charAt(pos);
         if (c == ',') {
           pos++;
         } else if (c == '}') {
           pos++;
+          depth--;
           return object;
         } else {
           throw new IllegalArgumentException("expected ',' or '}' at offset " + pos);
@@ -150,25 +162,37 @@ public final class Json {
     }
 
     private List<Object> readArray() {
+      enterContainer();
       pos++; // '['
       List<Object> array = new ArrayList<>();
       skipWhitespace();
       if (!atEnd() && text.charAt(pos) == ']') {
         pos++;
+        depth--;
         return array;
       }
       while (true) {
         array.add(readValue());
         skipWhitespace();
+        if (atEnd()) {
+          throw new IllegalArgumentException("unterminated JSON array");
+        }
         char c = text.charAt(pos);
         if (c == ',') {
           pos++;
         } else if (c == ']') {
           pos++;
+          depth--;
           return array;
         } else {
           throw new IllegalArgumentException("expected ',' or ']' at offset " + pos);
         }
+      }
+    }
+
+    private void enterContainer() {
+      if (++depth > MAX_DEPTH) {
+        throw new IllegalArgumentException("JSON nesting deeper than " + MAX_DEPTH);
       }
     }
 
