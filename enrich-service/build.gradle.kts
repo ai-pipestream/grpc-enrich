@@ -4,6 +4,8 @@ plugins {
 
 dependencies {
     implementation(project(":enrich-api"))
+    implementation(libs.protobuf.java.util)
+    implementation(libs.gson)
     implementation(libs.grpc.netty.shaded)
     implementation(libs.grpc.services)
     runtimeOnly(libs.log4j.core)

@@ -31,6 +31,9 @@ public final class GrpcEnrichServer {
         intFromEnv("ENRICH_MAX_CONCURRENT_VLM", Math.max(2, cores), 1, 256);
     final int vlmTimeoutSeconds = intFromEnv("ENRICH_VLM_TIMEOUT_SECONDS", 300, 1, 86400);
     final int metricsInterval = intFromEnv("ENRICH_METRICS_INTERVAL_SECONDS", 60, 0, 86400);
+    // HTTP front end (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz).
+    // Unset defaults to 50057; "0" or an empty value disables the listener.
+    final Integer httpPort = httpPortFromEnv();
 
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     EnrichmentEngine engine =
@@ -54,6 +57,16 @@ public final class GrpcEnrichServer {
         + (vlmUrl.isEmpty() ? "unconfigured" : vlmUrl) + ", max "
         + (maxDocumentBytes >> 20) + " MiB, " + maxConcurrentVlm + " concurrent VLM calls)");
 
+    final EnrichHttpServer httpServer;
+    if (httpPort != null) {
+      httpServer = new EnrichHttpServer(httpPort, service, executor);
+      httpServer.start();
+      System.out.println("grpc-enrich HTTP front end listening on 0.0.0.0:" + httpServer.getPort()
+          + " (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz)");
+    } else {
+      httpServer = null;
+    }
+
     if (metricsInterval > 0) {
       Thread metrics = new Thread(() -> {
         while (true) {
@@ -71,6 +84,9 @@ public final class GrpcEnrichServer {
     }
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      if (httpServer != null) {
+        httpServer.close();
+      }
       server.shutdown();
       try {
         if (!server.awaitTermination(30, TimeUnit.SECONDS)) {
@@ -82,6 +98,18 @@ public final class GrpcEnrichServer {
       executor.shutdown();
     }, "grpc-enrich-shutdown"));
     server.awaitTermination();
+  }
+
+  /** Unset → the default HTTP port; blank or "0" → the HTTP listener is off. */
+  private static Integer httpPortFromEnv() {
+    String configured = System.getenv("ENRICH_HTTP_PORT");
+    if (configured == null) {
+      return 50057;
+    }
+    if (configured.isBlank() || configured.strip().equals("0")) {
+      return null;
+    }
+    return intFromEnv("ENRICH_HTTP_PORT", 50057, 1, 65535);
   }
 
   private static int intFromEnv(String name, int fallback, int min, int max) {
