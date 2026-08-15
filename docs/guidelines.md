@@ -1,10 +1,10 @@
-# grpc-enrich — guidelines
+# grpc-enrich: guidelines
 
 **This repo:** gRPC enrichment service: VLM picture-describe, chart extract, and formula/code annotations on a gRParse Document
 
 **Language:** C++ or Java gRPC *client of a VLM server*. No PyTorch in this process.
 
-**Copy from:** `/work/main/grpc-services/gRParse for Document handling; call llama.cpp / OVMS / OpenAI-compat HTTP — do not vendor transformers.`
+**Copy from:** `/work/main/grpc-services/gRParse` for Document handling; call llama.cpp / OVMS / OpenAI-compat HTTP. Do not vendor transformers.
 
 # Implementation guidelines
 
@@ -36,10 +36,9 @@ Sibling implementations to copy from (same workspace):
 
 ## Live stream is the product
 
-Docling convert is batch: one document when everything is finished.
-**We emit the first usable unit the moment it exists** so a UI can paint
-it. `Complete` / `ParseStatus` is a trailer (counts, failures), not the
-payload.
+Batch conversion returns one document when everything is finished. **We emit
+the first usable unit the moment it exists** so a UI can paint it.
+`Complete` / `ParseStatus` is a trailer (counts, failures), not the payload.
 
 - Do not buffer the whole parse and then send one message.
 - A unary "return the Document" RPC is optional convenience. UIs use the
@@ -51,30 +50,30 @@ payload.
 
 ## Wire
 
-- Binary gRPC. No JSON transcoding on the parse path.
-- **No JSON bridge** for typed data: no `json_format.MessageToDict` /
-  `ParseDict`, no `model_dump_json` round-trips, no stringified JSON
-  blobs as the schema. Preserve types. Use enums + `*_raw` for open
-  vocabularies. `google.protobuf.Value` / `Struct` only where the
-  upstream really is `dict[str, Any]`.
-- Native event stream first (like libreoffice / calamine / POI). Mapping
-  into `ai.pipestream.document.v1.Document` can live here *or* in gRParse;
-  do not invent a parallel JSON document.
-- If you emit Document items, tag `CollectorSource` (`collector`, `model`,
-  optional `confidence`). Sources never overwrite each other.
-- buf v2: lint `STANDARD` + `COMMENTS`, breaking `FILE`. Every field,
-  enum value, and RPC has a comment. `disallow_comment_ignores` when the
-  sibling does.
-- Package: `ai.pipestream.<service>.v1`.
-- Register **gRPC health** (`grpc.health.v1.Health`) and **server
-  reflection**.
+Binary gRPC, with no JSON transcoding on the parse path. Typed data never
+crosses a JSON bridge: no `json_format.MessageToDict` / `ParseDict`, no
+`model_dump_json` round-trips, no stringified JSON blobs as the schema.
+Preserve types, and use enums + `*_raw` for open vocabularies;
+`google.protobuf.Value` / `Struct` only where the upstream really is
+`dict[str, Any]`.
+
+The native event stream comes first (like libreoffice / calamine / POI).
+Mapping into `ai.pipestream.document.v1.Document` can live here *or* in
+gRParse; do not invent a parallel JSON document. If you emit Document items,
+tag `CollectorSource` (`collector`, `model`, optional `confidence`) so
+sources never overwrite each other.
+
+buf v2: lint `STANDARD` + `COMMENTS`, breaking `FILE`. Every field, enum
+value, and RPC has a comment, with `disallow_comment_ignores` when the
+sibling does. Package layout is `ai.pipestream.<service>.v1`. Register gRPC
+health (`grpc.health.v1.Health`) and server reflection.
 
 ## Process
 
 - Diskless hot path: request bytes in memory, no durable writes. Image
   runs `--read-only`. If a library must spill, tmpfs only, documented.
-- Byte cap → `RESOURCE_EXHAUSTED`. Bad / truncated input →
-  `INVALID_ARGUMENT`. Wrong format → `UNIMPLEMENTED`. Parser crash →
+- Byte cap: `RESOURCE_EXHAUSTED`. Bad / truncated input:
+  `INVALID_ARGUMENT`. Wrong format: `UNIMPLEMENTED`. Parser crash:
   `INTERNAL`. A failed collector is an error entry, not a process abort.
 - Bound concurrency (heap or VRAM), not "as many as requests."
 - Metrics line on an interval + optional Prometheus port, same idea as
@@ -112,4 +111,4 @@ payload.
   *server this client calls*).
 - Downloading Hugging Face weights at RPC time.
 - Changing gRParse in the same PR unless you are wiring the collector
-  endpoint — prefer a complete service here first.
+  endpoint: prefer a complete service here first.

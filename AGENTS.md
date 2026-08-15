@@ -1,4 +1,4 @@
-# AGENTS.md — grpc-enrich
+# AGENTS.md: grpc-enrich
 
 You are implementing **grpc-enrich** from scratch in this repo. There is no
 application code yet. Specs are the source of truth.
@@ -6,9 +6,9 @@ application code yet. Specs are the source of truth.
 ## Read this first, in order
 
 1. This file
-2. `docs/architecture.md` — fleet boundary, language, what we refuse to own
-3. `docs/design.md` — wire API sketch, Document mapping, tests
-4. `docs/guidelines.md` — fleet rules (streaming, proto, git, tests)
+2. `docs/architecture.md`: fleet boundary, language, what we refuse to own
+3. `docs/design.md`: wire API sketch, Document mapping, tests
+4. `docs/guidelines.md`: fleet rules (streaming, proto, git, tests)
 
 Do not start coding until those four are in your context. If architecture
 and an existing sibling disagree on *process* (diskless, health, buf),
@@ -20,7 +20,7 @@ plane), follow architecture.md.
 gRPC enrichment service: VLM picture-describe, chart extract, and formula/code annotations on a gRParse Document
 
 - **Language:** C++ or Java gRPC *client of a VLM server*. No PyTorch in this process.
-- **Copy from:** /work/main/grpc-services/gRParse for Document handling; call llama.cpp / OVMS / OpenAI-compat HTTP — do not vendor transformers.
+- **Copy from:** /work/main/grpc-services/gRParse for Document handling; call llama.cpp / OVMS / OpenAI-compat HTTP. Do not vendor transformers.
 - **Stack:** Document in, ItemAnnotation stream out, keyed by self_ref. Parse stays in gRParse / vlm-convert. This only annotates existing pictures/code/formulas.
 - **Live stream:** EnrichStarted (counts selected), then ItemAnnotation or ItemSkipped per item as each VLM call returns, EnrichComplete trailer.
 
