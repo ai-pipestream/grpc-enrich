@@ -322,4 +322,17 @@ message GetServiceInfoResponse {
   uint64 max_document_bytes = 4;
   // The server-wide cap on concurrent VLM calls per request.
   uint32 max_concurrent_vlm_calls = 5;
+  // Frontend advertisement for the shared demo shell.
+  UiInfo ui = 6;
+}
+
+// Frontend advertisement. Same shape in every ai-pipestream grpc service:
+// the demo shell reads it to build its tab bar.
+message UiInfo {
+  // Tab title, for example "Enrich".
+  string title = 1;
+  // Shell mount path, for example "/ui/enrich".
+  string path = 2;
+  // One line, used as the tab tooltip.
+  string description = 3;
 }

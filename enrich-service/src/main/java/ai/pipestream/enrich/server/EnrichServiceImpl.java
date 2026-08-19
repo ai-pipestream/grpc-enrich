@@ -9,6 +9,7 @@ import ai.pipestream.enrich.v1.EnrichServiceGrpc;
 import ai.pipestream.enrich.v1.GetServiceInfoRequest;
 import ai.pipestream.enrich.v1.GetServiceInfoResponse;
 import ai.pipestream.enrich.v1.ItemImage;
+import ai.pipestream.enrich.v1.UiInfo;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
@@ -32,6 +33,14 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
 
   public static final String SERVICE_VERSION = "0.1.0";
   public static final String API_VERSION = "v1";
+
+  // Frontend advertisement for the shared demo shell; same UiInfo shape in
+  // every ai-pipestream grpc service.
+  public static final UiInfo UI_INFO = UiInfo.newBuilder()
+      .setTitle("Enrich")
+      .setPath("/ui/enrich")
+      .setDescription("Document in, stream of typed ItemAnnotation enrichment events out")
+      .build();
 
   final AtomicLong enriched = new AtomicLong();
   final AtomicLong rejected = new AtomicLong();
@@ -187,6 +196,7 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
         .setDefaultVlmEndpoint(defaultEndpoint)
         .setMaxDocumentBytes(maxDocumentBytes)
         .setMaxConcurrentVlmCalls(maxConcurrentVlmCalls)
+        .setUi(UI_INFO)
         .build());
     responseObserver.onCompleted();
   }

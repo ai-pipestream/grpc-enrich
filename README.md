@@ -71,7 +71,9 @@ v1alpha).
   `ItemSkipped` per item as that VLM call returns, `EnrichComplete` trailer.
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
   VLM call is an `ItemSkipped` (`SKIP_REASON_VLM_ERROR`), never an RPC error.
-- `GetServiceInfo`: versions, default endpoint, byte cap, concurrency cap.
+- `GetServiceInfo`: versions, default endpoint, byte cap, concurrency cap, and
+  the `UiInfo` frontend advertisement (tab title/path/tooltip) shared with the
+  other ai-pipestream services.
 
 `ai/pipestream/document/v1/document.proto` is vendored verbatim from gRParse
 (the canonical copy); do not edit it here.

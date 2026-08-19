@@ -30,6 +30,8 @@ import ai.pipestream.enrich.v1.EnrichDocumentRequest;
 import ai.pipestream.enrich.v1.EnrichDocumentResponse;
 import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.v1.EnrichServiceGrpc;
+import ai.pipestream.enrich.v1.GetServiceInfoRequest;
+import ai.pipestream.enrich.v1.GetServiceInfoResponse;
 import ai.pipestream.enrich.v1.ItemAnnotation;
 import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.ItemSkipped;
@@ -195,9 +197,56 @@ class EnrichServiceTest {
         .toList();
   }
 
+  /** Drives the unary GetServiceInfo RPC to completion and returns the response. */
+  private static GetServiceInfoResponse unaryGetServiceInfo(
+      EnrichServiceGrpc.EnrichServiceStub stub) throws InterruptedException {
+    BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
+    stub.getServiceInfo(GetServiceInfoRequest.getDefaultInstance(), new StreamObserver<>() {
+      @Override
+      public void onNext(GetServiceInfoResponse response) {
+        inbox.add(response);
+      }
+
+      @Override
+      public void onError(Throwable error) {
+        inbox.add(error);
+      }
+
+      @Override
+      public void onCompleted() {
+        inbox.add("DONE");
+      }
+    });
+
+    GetServiceInfoResponse response = null;
+    while (true) {
+      Object item = inbox.poll(30, TimeUnit.SECONDS);
+      assertNotNull(item, "RPC did not terminate within 30s");
+      if (item instanceof GetServiceInfoResponse info) {
+        response = info;
+      } else if (item instanceof Throwable error) {
+        return fail("GetServiceInfo failed", error);
+      } else {
+        return response;
+      }
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Definition-of-done cases
   // -------------------------------------------------------------------------
+
+  @Test
+  void getServiceInfo_advertisesUi() throws Exception {
+    EnrichServiceGrpc.EnrichServiceStub stub = startService("");
+
+    GetServiceInfoResponse info = unaryGetServiceInfo(stub);
+
+    assertEquals("Enrich", info.getUi().getTitle());
+    assertEquals("/ui/enrich", info.getUi().getPath());
+    assertEquals("Document in, stream of typed ItemAnnotation enrichment events out",
+        info.getUi().getDescription());
+  }
 
   @Test
   void describeOn_onePictureOneParagraph() throws Exception {
