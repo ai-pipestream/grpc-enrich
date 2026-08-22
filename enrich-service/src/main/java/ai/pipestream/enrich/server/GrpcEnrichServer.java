@@ -21,6 +21,9 @@ import java.util.concurrent.TimeUnit;
  */
 public final class GrpcEnrichServer {
 
+  /** Default port for the HTTP front end when ENRICH_HTTP_PORT is unset. */
+  static final int DEFAULT_HTTP_PORT = 50068;
+
   public static void main(String[] args) throws Exception {
     final int port = intFromEnv("ENRICH_PORT", 50056, 1, 65535);
     final String vlmUrl = System.getenv().getOrDefault("ENRICH_VLM_URL", "");
@@ -32,7 +35,7 @@ public final class GrpcEnrichServer {
     final int vlmTimeoutSeconds = intFromEnv("ENRICH_VLM_TIMEOUT_SECONDS", 300, 1, 86400);
     final int metricsInterval = intFromEnv("ENRICH_METRICS_INTERVAL_SECONDS", 60, 0, 86400);
     // HTTP front end (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz).
-    // Unset defaults to 50057; "0" or an empty value disables the listener.
+    // Unset defaults to 50068; "0" or an empty value disables the listener.
     final Integer httpPort = httpPortFromEnv();
 
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -104,12 +107,12 @@ public final class GrpcEnrichServer {
   private static Integer httpPortFromEnv() {
     String configured = System.getenv("ENRICH_HTTP_PORT");
     if (configured == null) {
-      return 50057;
+      return DEFAULT_HTTP_PORT;
     }
     if (configured.isBlank() || configured.strip().equals("0")) {
       return null;
     }
-    return intFromEnv("ENRICH_HTTP_PORT", 50057, 1, 65535);
+    return intFromEnv("ENRICH_HTTP_PORT", DEFAULT_HTTP_PORT, 1, 65535);
   }
 
   private static int intFromEnv(String name, int fallback, int min, int max) {

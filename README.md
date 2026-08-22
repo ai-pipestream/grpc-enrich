@@ -46,7 +46,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | Env | Default | Meaning |
 |---|---|---|
 | `ENRICH_PORT` | `50056` | gRPC listen port |
-| `ENRICH_HTTP_PORT` | `50057` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
+| `ENRICH_HTTP_PORT` | `50068` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
 | `ENRICH_VLM_URL` | unset | Default VLM endpoint (base URL; the client posts to `<url>/v1/chat/completions`). Per-request `EnrichOptions.vlm_endpoint` overrides |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Assembled document byte cap (`RESOURCE_EXHAUSTED` above) |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
@@ -81,7 +81,7 @@ v1alpha).
 ## HTTP API
 
 The same binary also serves an HTTP front end on `ENRICH_HTTP_PORT` (default
-`50057`; set to `0` or empty to disable). It is a thin shim over the gRPC
+`50068`; set to `0` or empty to disable). It is a thin shim over the gRPC
 `EnrichServiceImpl`: requests are driven through the same streaming code
 path, so events, skip semantics, and the byte cap are identical. All bodies
 are canonical proto3 JSON (protobuf `JsonFormat`): camelCase or snake_case
@@ -115,12 +115,12 @@ chunked route, so `item_images` crops apply and the byte cap is enforced).
 
 ```sh
 # Sync: one JSON document with every event
-curl -s localhost:50057/v1/enrich -d '{
+curl -s localhost:50068/v1/enrich -d '{
   "options": {"doPictureDescription": true, "document": {"name": "doc", "pictures": ["..."]}}
 }'
 
 # Async: live per-item events as NDJSON
-curl -sN localhost:50057/v1/enrich/stream -d '{
+curl -sN localhost:50068/v1/enrich/stream -d '{
   "options": {"doPictureDescription": true, "document": {"name": "doc", "pictures": ["..."]}}
 }'
 # {"started":{"pictureDescriptions":2}}
