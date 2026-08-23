@@ -14,7 +14,6 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -69,7 +68,9 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
       StreamObserver<EnrichDocumentResponse> responseObserver) {
     return new StreamObserver<>() {
       private final Object sendLock = new Object();
-      private final ByteArrayOutputStream chunks = new ByteArrayOutputStream();
+      // A ByteString rope: concat is cheap and parseFrom reads it directly,
+      // so chunked uploads are never copied into an intermediate array.
+      private ByteString chunks = ByteString.EMPTY;
       private final Map<String, ItemImage> crops = new HashMap<>();
       private EnrichOptions options;
       private boolean started;
@@ -112,11 +113,11 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
               + maxDocumentBytes);
           return;
         }
-        chunks.writeBytes(data.toByteArray());
+        chunks = chunks.concat(data);
         if (complete) {
           final Document document;
           try {
-            document = Document.parseFrom(chunks.toByteArray());
+            document = Document.parseFrom(chunks);
           } catch (InvalidProtocolBufferException bad) {
             fail(Status.INVALID_ARGUMENT,
                 "chunk bytes do not parse as a Document: " + bad.getMessage());
@@ -137,7 +138,7 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
           return;
         }
         if (!started) {
-          if (chunks.size() == 0) {
+          if (chunks.isEmpty()) {
             fail(Status.INVALID_ARGUMENT,
                 "stream ended without a document: send EnrichOptions with an inline document "
                     + "or DocumentChunk messages");

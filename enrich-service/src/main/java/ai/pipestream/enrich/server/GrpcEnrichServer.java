@@ -8,9 +8,10 @@ import io.grpc.Server;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.grpc.protobuf.services.ProtoReflectionService;
 import io.grpc.protobuf.services.ProtoReflectionServiceV1;
-import java.time.Duration;
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -22,71 +23,31 @@ import java.util.concurrent.TimeUnit;
 public final class GrpcEnrichServer {
 
   /** Default port for the HTTP front end when ENRICH_HTTP_PORT is unset. */
-  static final int DEFAULT_HTTP_PORT = 50068;
+  static final int DEFAULT_HTTP_PORT = EnrichConfig.DEFAULT_HTTP_PORT;
+
+  private GrpcEnrichServer() {}
 
   public static void main(String[] args) throws Exception {
-    final int port = intFromEnv("ENRICH_PORT", 50056, 1, 65535);
-    final String vlmUrl = System.getenv().getOrDefault("ENRICH_VLM_URL", "");
-    final long maxDocumentBytes =
-        intFromEnv("ENRICH_MAX_DOCUMENT_MIB", 70, 1, 4096) * 1024L * 1024L;
-    final int cores = Runtime.getRuntime().availableProcessors();
-    final int maxConcurrentVlm =
-        intFromEnv("ENRICH_MAX_CONCURRENT_VLM", Math.max(2, cores), 1, 256);
-    final int vlmTimeoutSeconds = intFromEnv("ENRICH_VLM_TIMEOUT_SECONDS", 300, 1, 86400);
-    final int metricsInterval = intFromEnv("ENRICH_METRICS_INTERVAL_SECONDS", 60, 0, 86400);
-    // HTTP front end (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz).
-    // Unset defaults to 50068; "0" or an empty value disables the listener.
-    final Integer httpPort = httpPortFromEnv();
-
+    EnrichConfig config = EnrichConfig.fromEnv();
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-    EnrichmentEngine engine =
-        new EnrichmentEngine(OpenAiCompatVlmClient::new, vlmUrl, maxConcurrentVlm,
-            maxConcurrentVlm, Duration.ofSeconds(vlmTimeoutSeconds), executor);
-    EnrichServiceImpl service =
-        new EnrichServiceImpl(maxDocumentBytes, engine, executor, vlmUrl, maxConcurrentVlm);
-    HealthStatusManager health = new HealthStatusManager();
-    Server server =
-        Grpc.newServerBuilderForPort(port, InsecureServerCredentials.create())
-            // Allow single-chunk uploads of a full-size document plus framing.
-            .maxInboundMessageSize((int) Math.min(Integer.MAX_VALUE, maxDocumentBytes + (1 << 20)))
-            .addService(service)
-            .addService(health.getHealthService())
-            .addService(ProtoReflectionService.newInstance())
-            .addService(ProtoReflectionServiceV1.newInstance())
-            .build()
-            .start();
-    System.out.println("grpc-enrich " + EnrichServiceImpl.SERVICE_VERSION
-        + " listening on 0.0.0.0:" + port + " (vlm endpoint: "
-        + (vlmUrl.isEmpty() ? "unconfigured" : vlmUrl) + ", max "
-        + (maxDocumentBytes >> 20) + " MiB, " + maxConcurrentVlm + " concurrent VLM calls)");
+    EnrichmentEngine engine = new EnrichmentEngine(
+        OpenAiCompatVlmClient::new,
+        config.vlmUrl(),
+        config.maxConcurrentVlm(),
+        config.maxConcurrentVlm(),
+        config.vlmTimeout(),
+        executor);
+    EnrichServiceImpl service = new EnrichServiceImpl(
+        config.maxDocumentBytes(), engine, executor, config.vlmUrl(), config.maxConcurrentVlm());
 
-    final EnrichHttpServer httpServer;
-    if (httpPort != null) {
-      httpServer = new EnrichHttpServer(httpPort, service, executor);
-      httpServer.start();
-      System.out.println("grpc-enrich HTTP front end listening on 0.0.0.0:" + httpServer.getPort()
-          + " (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz)");
-    } else {
-      httpServer = null;
-    }
-
-    if (metricsInterval > 0) {
-      Thread metrics = new Thread(() -> {
-        while (true) {
-          try {
-            TimeUnit.SECONDS.sleep(metricsInterval);
-          } catch (InterruptedException interrupt) {
-            return;
-          }
-          System.out.println("grpc-enrich metrics: docs{enriched=" + service.enriched.get()
-              + ",rejected=" + service.rejected.get() + "}");
-        }
-      }, "grpc-enrich-metrics");
-      metrics.setDaemon(true);
-      metrics.start();
-    }
+    Server server = startGrpcServer(config, service);
+    EnrichHttpServer httpServer = startHttpServer(config, service, executor);
+    ScheduledExecutorService metrics = startMetrics(config, service);
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      if (metrics != null) {
+        metrics.shutdownNow();
+      }
       if (httpServer != null) {
         httpServer.close();
       }
@@ -103,33 +64,58 @@ public final class GrpcEnrichServer {
     server.awaitTermination();
   }
 
-  /** Unset → the default HTTP port; blank or "0" → the HTTP listener is off. */
-  private static Integer httpPortFromEnv() {
-    String configured = System.getenv("ENRICH_HTTP_PORT");
-    if (configured == null) {
-      return DEFAULT_HTTP_PORT;
-    }
-    if (configured.isBlank() || configured.strip().equals("0")) {
-      return null;
-    }
-    return intFromEnv("ENRICH_HTTP_PORT", DEFAULT_HTTP_PORT, 1, 65535);
+  private static Server startGrpcServer(EnrichConfig config, EnrichServiceImpl service)
+      throws IOException {
+    HealthStatusManager health = new HealthStatusManager();
+    Server server =
+        Grpc.newServerBuilderForPort(config.port(), InsecureServerCredentials.create())
+            // Allow single-chunk uploads of a full-size document plus framing.
+            .maxInboundMessageSize(
+                (int) Math.min(Integer.MAX_VALUE, config.maxDocumentBytes() + (1 << 20)))
+            .addService(service)
+            .addService(health.getHealthService())
+            .addService(ProtoReflectionService.newInstance())
+            .addService(ProtoReflectionServiceV1.newInstance())
+            .build()
+            .start();
+    System.out.println("grpc-enrich " + EnrichServiceImpl.SERVICE_VERSION
+        + " listening on 0.0.0.0:" + config.port() + " (vlm endpoint: "
+        + (config.vlmUrl().isEmpty() ? "unconfigured" : config.vlmUrl()) + ", max "
+        + (config.maxDocumentBytes() >> 20) + " MiB, " + config.maxConcurrentVlm()
+        + " concurrent VLM calls)");
+    return server;
   }
 
-  private static int intFromEnv(String name, int fallback, int min, int max) {
-    String configured = System.getenv(name);
-    if (configured == null || configured.isBlank()) {
-      return fallback;
+  /** Starts the HTTP front end, or returns null when it is disabled. */
+  private static EnrichHttpServer startHttpServer(
+      EnrichConfig config, EnrichServiceImpl service, ExecutorService executor)
+      throws IOException {
+    if (config.httpPort() == null) {
+      return null;
     }
-    final int value;
-    try {
-      value = Integer.parseInt(configured.strip());
-    } catch (NumberFormatException bad) {
-      throw new IllegalArgumentException(name + " must be an integer, got: " + configured);
+    EnrichHttpServer httpServer = new EnrichHttpServer(config.httpPort(), service, executor);
+    httpServer.start();
+    System.out.println("grpc-enrich HTTP front end listening on 0.0.0.0:" + httpServer.getPort()
+        + " (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz)");
+    return httpServer;
+  }
+
+  /** Schedules the periodic metrics line, or returns null when disabled. */
+  private static ScheduledExecutorService startMetrics(
+      EnrichConfig config, EnrichServiceImpl service) {
+    long seconds = config.metricsInterval().toSeconds();
+    if (seconds <= 0) {
+      return null;
     }
-    if (value < min || value > max) {
-      throw new IllegalArgumentException(name + " must be in [" + min + ", " + max + "], got: "
-          + value);
-    }
-    return value;
+    ScheduledExecutorService metrics = Executors.newSingleThreadScheduledExecutor(task -> {
+      Thread thread = new Thread(task, "grpc-enrich-metrics");
+      thread.setDaemon(true);
+      return thread;
+    });
+    metrics.scheduleAtFixedRate(
+        () -> System.out.println("grpc-enrich metrics: docs{enriched=" + service.enriched.get()
+            + ",rejected=" + service.rejected.get() + "}"),
+        seconds, seconds, TimeUnit.SECONDS);
+    return metrics;
   }
 }

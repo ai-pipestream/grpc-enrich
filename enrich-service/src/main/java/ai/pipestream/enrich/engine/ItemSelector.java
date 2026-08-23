@@ -1,8 +1,10 @@
 package ai.pipestream.enrich.engine;
 
 import ai.pipestream.document.v1.CodeItem;
+import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.document.v1.FormulaItem;
+import ai.pipestream.document.v1.ImageRef;
 import ai.pipestream.document.v1.PageItem;
 import ai.pipestream.document.v1.PictureClassificationData;
 import ai.pipestream.document.v1.PictureItem;
@@ -15,6 +17,7 @@ import ai.pipestream.enrich.v1.SkipReason;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -172,7 +175,7 @@ public final class ItemSelector {
    * prediction is one of the supported chart types; there is no layout
    * re-run here. */
   private static boolean isChart(PictureItem picture) {
-    if (picture.getLabel() == ai.pipestream.document.v1.DocItemLabel.DOC_ITEM_LABEL_CHART) {
+    if (picture.getLabel() == DocItemLabel.DOC_ITEM_LABEL_CHART) {
       return true;
     }
     for (var annotation : picture.getAnnotationsList()) {
@@ -182,7 +185,7 @@ public final class ItemSelector {
             && SUPPORTED_CHART_TYPES.contains(classification
                 .getPredictedClasses(0)
                 .getClassName()
-                .toLowerCase(java.util.Locale.ROOT))) {
+                .toLowerCase(Locale.ROOT))) {
           return true;
         }
       }
@@ -225,7 +228,7 @@ public final class ItemSelector {
   /** Resolves image bytes for an item: an ItemImage crop wins, then an inline
    * data URI on the item's ImageRef. Anything else is null (skipped). */
   private static String imageDataUri(
-      ai.pipestream.document.v1.ImageRef imageRef, String selfRef, Map<String, ItemImage> crops) {
+      ImageRef imageRef, String selfRef, Map<String, ItemImage> crops) {
     String crop = cropDataUri(selfRef, crops);
     if (crop != null) {
       return crop;

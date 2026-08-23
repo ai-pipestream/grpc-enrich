@@ -37,6 +37,15 @@ public final class OpenAiCompatVlmClient implements VlmClient {
   private static final Duration DEFAULT_BASE_BACKOFF = Duration.ofMillis(100);
   private static final Set<Integer> RETRYABLE_STATUSES = Set.of(429, 500, 502, 503, 504);
 
+  /**
+   * One HttpClient for the process: HttpClient is thread-safe and pools
+   * connections per destination, and a client instance is created per
+   * enrichment request, so sharing avoids a fresh connection pool (and its
+   * selector machinery) per document.
+   */
+  private static final HttpClient SHARED_HTTP =
+      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+
   private final String completionsUrl;
   private final HttpClient http;
   private final Duration baseBackoff;
@@ -50,7 +59,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
     String trimmed = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
     this.completionsUrl =
         trimmed.endsWith(COMPLETIONS_PATH) ? trimmed : trimmed + COMPLETIONS_PATH;
-    this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    this.http = SHARED_HTTP;
     this.baseBackoff = baseBackoff;
   }
 
