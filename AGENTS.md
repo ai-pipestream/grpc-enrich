@@ -2,7 +2,7 @@
 
 **Status: implemented.** `grpc-enrich` is a working Java gRPC server: a
 `Document` in, a live stream of typed `ItemAnnotation` / `ItemSkipped`
-events out, keyed by `self_ref`. 157 tests pass (`./gradlew clean build
+events out, keyed by `self_ref`. 176 tests pass (`./gradlew clean build
 test --no-daemon`). Specs (`docs/*.md`) remain the source of truth for
 wire shape and rules; this file is the status/orientation layer on top.
 
