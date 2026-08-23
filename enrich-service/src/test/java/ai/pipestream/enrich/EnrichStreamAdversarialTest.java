@@ -29,6 +29,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -358,9 +359,12 @@ class EnrichStreamAdversarialTest {
   @Test
   void optionsSentTwice_invalidArgument() throws Exception {
     EnrichServiceGrpc.EnrichServiceStub stub = startService("");
+    // No inline document, so enrichment never starts and the stream is
+    // guaranteed still open when the duplicate arrives. An inline document
+    // would race: enrichment can complete the stream before the second
+    // message is delivered, and a closed call drops it silently.
     EnrichOptions options = EnrichOptions.newBuilder()
         .setDoPictureDescription(true)
-        .setDocument(documentWithPictures(1))
         .build();
     Collected result = runRpc(stub,
         List.of(optionsRequest(options), optionsRequest(options)));
@@ -400,20 +404,30 @@ class EnrichStreamAdversarialTest {
   @Test
   void chunksAfterCompleteChunk_invalidArgument() throws Exception {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
-      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
-      byte[] documentBytes = documentWithPictures(1).toByteArray();
-      EnrichOptions options = EnrichOptions.newBuilder()
-          .setDoPictureDescription(true)
-          .build();
-      List<EnrichDocumentRequest> requests = List.of(
-          optionsRequest(options),
-          EnrichDocumentRequest.newBuilder().setChunk(DocumentChunk.newBuilder()
-              .setData(ByteString.copyFrom(documentBytes)).setComplete(true)).build(),
-          EnrichDocumentRequest.newBuilder().setChunk(DocumentChunk.newBuilder()
-              .setData(ByteString.copyFromUtf8("late")).setComplete(true)).build());
-      Collected result = runRpc(stub, requests);
-      assertThat(result.error()).isNotNull();
-      assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+      // Park the single VLM call on a latch so enrichment cannot complete
+      // the stream before the late chunk is delivered; without the gate the
+      // rejection races stream completion.
+      CountDownLatch gate = new CountDownLatch(1);
+      vlm.gates = Map.of(1, gate);
+      try {
+        EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+        byte[] documentBytes = documentWithPictures(1).toByteArray();
+        EnrichOptions options = EnrichOptions.newBuilder()
+            .setDoPictureDescription(true)
+            .build();
+        List<EnrichDocumentRequest> requests = List.of(
+            optionsRequest(options),
+            EnrichDocumentRequest.newBuilder().setChunk(DocumentChunk.newBuilder()
+                .setData(ByteString.copyFrom(documentBytes)).setComplete(true)).build(),
+            EnrichDocumentRequest.newBuilder().setChunk(DocumentChunk.newBuilder()
+                .setData(ByteString.copyFromUtf8("late")).setComplete(true)).build());
+        Collected result = runRpc(stub, requests);
+        assertThat(result.error()).isNotNull();
+        assertThat(result.error().getStatus().getCode())
+            .isEqualTo(Status.Code.INVALID_ARGUMENT);
+      } finally {
+        gate.countDown();
+      }
     }
   }
 
