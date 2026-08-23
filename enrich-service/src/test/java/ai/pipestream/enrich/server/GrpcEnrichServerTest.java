@@ -1,6 +1,6 @@
 package ai.pipestream.enrich.server;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +14,6 @@ class GrpcEnrichServerTest {
 
   @Test
   void defaultHttpPortDoesNotCollideWithGrpcPort() {
-    assertEquals(50068, GrpcEnrichServer.DEFAULT_HTTP_PORT);
+    assertThat(GrpcEnrichServer.DEFAULT_HTTP_PORT).isEqualTo(50068);
   }
 }

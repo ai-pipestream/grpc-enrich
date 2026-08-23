@@ -1,11 +1,7 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
 import ai.pipestream.document.v1.BoundingBox;
 import ai.pipestream.document.v1.CodeItem;
@@ -168,7 +164,7 @@ class EnrichServiceTest {
     List<EnrichDocumentResponse> events = new ArrayList<>();
     while (true) {
       Object item = inbox.poll(30, TimeUnit.SECONDS);
-      assertNotNull(item, "RPC did not terminate within 30s");
+      assertThat(item).as("RPC did not terminate within 30s").isNotNull();
       if (item instanceof EnrichDocumentResponse event) {
         events.add(event);
       } else if (item instanceof StatusRuntimeException error) {
@@ -221,7 +217,7 @@ class EnrichServiceTest {
     GetServiceInfoResponse response = null;
     while (true) {
       Object item = inbox.poll(30, TimeUnit.SECONDS);
-      assertNotNull(item, "RPC did not terminate within 30s");
+      assertThat(item).as("RPC did not terminate within 30s").isNotNull();
       if (item instanceof GetServiceInfoResponse info) {
         response = info;
       } else if (item instanceof Throwable error) {
@@ -242,10 +238,10 @@ class EnrichServiceTest {
 
     GetServiceInfoResponse info = unaryGetServiceInfo(stub);
 
-    assertEquals("Enrich", info.getUi().getTitle());
-    assertEquals("/ui/enrich", info.getUi().getPath());
-    assertEquals("Document in, stream of typed ItemAnnotation enrichment events out",
-        info.getUi().getDescription());
+    assertThat(info.getUi().getTitle()).isEqualTo("Enrich");
+    assertThat(info.getUi().getPath()).isEqualTo("/ui/enrich");
+    assertThat(info.getUi().getDescription())
+        .isEqualTo("Document in, stream of typed ItemAnnotation enrichment events out");
   }
 
   @Test
@@ -261,24 +257,24 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error(), "RPC must be OK: " + result.error());
-      assertTrue(result.completed());
-      assertEquals(1, result.events().get(0).getStarted().getPictureDescriptions());
+      assertThat(result.error()).as("RPC must be OK: " + result.error()).isNull();
+      assertThat(result.completed()).isTrue();
+      assertThat(result.events().get(0).getStarted().getPictureDescriptions()).isEqualTo(1);
       List<ItemAnnotation> annotations = annotations(result);
-      assertEquals(1, annotations.size());
-      assertEquals("#/pictures/0", annotations.get(0).getSelfRef());
-      assertEquals("a QR code on a white background",
-          annotations.get(0).getDescription().getText());
-      assertEquals("smolvlm", annotations.get(0).getModel());
-      assertTrue(skips(result).isEmpty());
-      assertEquals(1, result.events().get(result.events().size() - 1)
-          .getComplete().getSucceeded());
+      assertThat(annotations.size()).isEqualTo(1);
+      assertThat(annotations.get(0).getSelfRef()).isEqualTo("#/pictures/0");
+      assertThat(annotations.get(0).getDescription().getText())
+          .isEqualTo("a QR code on a white background");
+      assertThat(annotations.get(0).getModel()).isEqualTo("smolvlm");
+      assertThat(skips(result)).isEmpty();
+      assertThat(result.events().get(result.events().size() - 1)
+          .getComplete().getSucceeded()).isEqualTo(1);
       // The text item is untouched: no annotation event references it.
-      assertTrue(annotations.stream().noneMatch(a -> a.getSelfRef().equals("#/texts/0")));
+      assertThat(annotations.stream().noneMatch(a -> a.getSelfRef().equals("#/texts/0"))).isTrue();
       // The fake saw the describe model and the picture bytes.
-      assertEquals(1, vlm.requests.size());
-      assertEquals("smolvlm", vlm.requests.get(0).model());
-      assertTrue(vlm.requests.get(0).hasImage());
+      assertThat(vlm.requests.size()).isEqualTo(1);
+      assertThat(vlm.requests.get(0).model()).isEqualTo("smolvlm");
+      assertThat(vlm.requests.get(0).hasImage()).isTrue();
     }
   }
 
@@ -298,13 +294,14 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error(), "a missing image must not fail the RPC");
+      assertThat(result.error()).as("a missing image must not fail the RPC").isNull();
       List<ItemSkipped> skips = skips(result);
-      assertEquals(1, skips.size());
-      assertEquals("#/pictures/0", skips.get(0).getSelfRef());
-      assertEquals(SkipReason.SKIP_REASON_NO_IMAGE, skips.get(0).getReason());
-      assertEquals(1, result.events().get(result.events().size() - 1).getComplete().getSkipped());
-      assertTrue(vlm.requests.isEmpty(), "no VLM call may be made without image bytes");
+      assertThat(skips.size()).isEqualTo(1);
+      assertThat(skips.get(0).getSelfRef()).isEqualTo("#/pictures/0");
+      assertThat(skips.get(0).getReason()).isEqualTo(SkipReason.SKIP_REASON_NO_IMAGE);
+      assertThat(result.events().get(result.events().size() - 1).getComplete().getSkipped())
+          .isEqualTo(1);
+      assertThat(vlm.requests.isEmpty()).as("no VLM call may be made without image bytes").isTrue();
     }
   }
 
@@ -327,9 +324,10 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertEquals(1, skips(result).size());
-      assertEquals(SkipReason.SKIP_REASON_UNFETCHABLE_URI, skips(result).get(0).getReason());
+      assertThat(result.error()).isNull();
+      assertThat(skips(result).size()).isEqualTo(1);
+      assertThat(skips(result).get(0).getReason())
+          .isEqualTo(SkipReason.SKIP_REASON_UNFETCHABLE_URI);
     }
   }
 
@@ -349,23 +347,24 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
+      assertThat(result.error()).isNull();
       List<ItemAnnotation> annotations = annotations(result);
-      assertEquals(1, annotations.size());
+      assertThat(annotations.size()).isEqualTo(1);
       var table = annotations.get(0).getChartTable().getTable();
-      assertEquals(2, table.getNumRows());
-      assertEquals(3, table.getNumCols());
-      assertEquals(6, table.getTableCellsCount());
-      assertTrue(table.getTableCells(0).getColumnHeader());
-      assertEquals("year", table.getTableCells(0).getText());
-      assertFalse(table.getTableCells(3).getColumnHeader());
-      assertEquals("3", table.getTableCells(5).getText());
-      assertEquals(1, table.getTableCells(5).getStartRowOffsetIdx());
-      assertEquals(2, table.getTableCells(5).getStartColOffsetIdx());
-      assertEquals(2, table.getGridCount());
+      assertThat(table.getNumRows()).isEqualTo(2);
+      assertThat(table.getNumCols()).isEqualTo(3);
+      assertThat(table.getTableCellsCount()).isEqualTo(6);
+      assertThat(table.getTableCells(0).getColumnHeader()).isTrue();
+      assertThat(table.getTableCells(0).getText()).isEqualTo("year");
+      assertThat(table.getTableCells(3).getColumnHeader()).isFalse();
+      assertThat(table.getTableCells(5).getText()).isEqualTo("3");
+      assertThat(table.getTableCells(5).getStartRowOffsetIdx()).isEqualTo(1);
+      assertThat(table.getTableCells(5).getStartColOffsetIdx()).isEqualTo(2);
+      assertThat(table.getGridCount()).isEqualTo(2);
       // The raw CSV rides along, but the typed cells are the representation.
-      assertEquals("year,sales,profit\n2023,10,3", annotations.get(0).getChartTable().getCsv());
-      assertEquals("granite-vision-chart2csv", vlm.requests.get(0).model());
+      assertThat(annotations.get(0).getChartTable().getCsv())
+          .isEqualTo("year,sales,profit\n2023,10,3");
+      assertThat(vlm.requests.get(0).model()).isEqualTo("granite-vision-chart2csv");
     }
   }
 
@@ -382,12 +381,13 @@ class EnrichServiceTest {
         .build();
     Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-    assertNull(result.error(), "a dead VLM endpoint must not fail the RPC");
-    assertTrue(annotations(result).isEmpty());
+    assertThat(result.error()).as("a dead VLM endpoint must not fail the RPC").isNull();
+    assertThat(annotations(result)).isEmpty();
     List<ItemSkipped> skips = skips(result);
-    assertEquals(1, skips.size());
-    assertEquals(SkipReason.SKIP_REASON_VLM_ERROR, skips.get(0).getReason());
-    assertEquals(1, result.events().get(result.events().size() - 1).getComplete().getSkipped());
+    assertThat(skips.size()).isEqualTo(1);
+    assertThat(skips.get(0).getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
+    assertThat(result.events().get(result.events().size() - 1).getComplete().getSkipped())
+        .isEqualTo(1);
   }
 
   @Test
@@ -401,10 +401,11 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertEquals(1, skips(result).size());
-      assertEquals(SkipReason.SKIP_REASON_VLM_ERROR, skips(result).get(0).getReason());
-      assertEquals(6, vlm.requests.size(), "persistent 500 is retried 5 times, then skipped");
+      assertThat(result.error()).isNull();
+      assertThat(skips(result).size()).isEqualTo(1);
+      assertThat(skips(result).get(0).getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
+      assertThat(vlm.requests.size()).as("persistent 500 is retried 5 times, then skipped")
+          .isEqualTo(6);
     }
   }
 
@@ -419,10 +420,11 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertTrue(skips(result).isEmpty());
-      assertEquals(1, annotations(result).size());
-      assertEquals(2, vlm.requests.size(), "a transient 503 is retried and the item enriches");
+      assertThat(result.error()).isNull();
+      assertThat(skips(result)).isEmpty();
+      assertThat(annotations(result).size()).isEqualTo(1);
+      assertThat(vlm.requests.size()).as("a transient 503 is retried and the item enriches")
+          .isEqualTo(2);
     }
   }
 
@@ -454,29 +456,29 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertEquals(1, result.events().get(0).getStarted().getCodeEnrichments());
-      assertEquals(1, result.events().get(0).getStarted().getFormulaEnrichments());
-      assertEquals(2, annotations(result).size());
+      assertThat(result.error()).isNull();
+      assertThat(result.events().get(0).getStarted().getCodeEnrichments()).isEqualTo(1);
+      assertThat(result.events().get(0).getStarted().getFormulaEnrichments()).isEqualTo(1);
+      assertThat(annotations(result).size()).isEqualTo(2);
       ItemAnnotation code = annotations(result).stream()
           .filter(a -> a.getSelfRef().equals("#/texts/0")).findFirst().orElseThrow();
-      assertEquals("print('hi')", code.getCode().getText());
+      assertThat(code.getCode().getText()).isEqualTo("print('hi')");
       ItemAnnotation formula = annotations(result).stream()
           .filter(a -> a.getSelfRef().equals("#/texts/1")).findFirst().orElseThrow();
-      assertEquals("x^2 + y^2 = z^2", formula.getFormula().getText());
-      assertEquals(2, result.events().get(result.events().size() - 1)
-          .getComplete().getSucceeded());
+      assertThat(formula.getFormula().getText()).isEqualTo("x^2 + y^2 = z^2");
+      assertThat(result.events().get(result.events().size() - 1)
+          .getComplete().getSucceeded()).isEqualTo(2);
       // Text-only enrichment sends no image, keeps the existing text in the
       // prompt, and uses the code/formula generation budget.
-      assertEquals(2, vlm.requests.size());
+      assertThat(vlm.requests.size()).isEqualTo(2);
       for (var request : vlm.requests) {
-        assertFalse(request.hasImage());
-        assertEquals(2048, request.maxTokens());
+        assertThat(request.hasImage()).isFalse();
+        assertThat(request.maxTokens()).isEqualTo(2048);
       }
-      assertTrue(vlm.requests.stream()
-          .anyMatch(r -> r.prompt().contains("print( 'hi' )")));
-      assertTrue(vlm.requests.stream()
-          .anyMatch(r -> r.prompt().contains("x2+y2=z2")));
+      assertThat(vlm.requests.stream()
+          .anyMatch(r -> r.prompt().contains("print( 'hi' )"))).isTrue();
+      assertThat(vlm.requests.stream()
+          .anyMatch(r -> r.prompt().contains("x2+y2=z2"))).isTrue();
     }
   }
 
@@ -507,18 +509,18 @@ class EnrichServiceTest {
                   .setComplete(true))
               .build()));
 
-      assertNull(result.error(), "RPC must be OK: " + result.error());
+      assertThat(result.error()).as("RPC must be OK: " + result.error()).isNull();
       // An image crop rides with the bare prompt "<code>".
-      assertEquals(1, vlm.requests.size());
-      assertTrue(vlm.requests.get(0).hasImage());
-      assertEquals("<code>", vlm.requests.get(0).prompt());
-      assertEquals(2048, vlm.requests.get(0).maxTokens());
+      assertThat(vlm.requests.size()).isEqualTo(1);
+      assertThat(vlm.requests.get(0).hasImage()).isTrue();
+      assertThat(vlm.requests.get(0).prompt()).isEqualTo("<code>");
+      assertThat(vlm.requests.get(0).maxTokens()).isEqualTo(2048);
       // Output post-processing: language token out, sentinels stripped.
-      assertEquals(1, annotations(result).size());
+      assertThat(annotations(result).size()).isEqualTo(1);
       var code = annotations(result).get(0).getCode();
-      assertEquals("print('hi')", code.getText());
-      assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON, code.getLanguage());
-      assertEquals("Python", code.getLanguageRaw());
+      assertThat(code.getText()).isEqualTo("print('hi')");
+      assertThat(code.getLanguage()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON);
+      assertThat(code.getLanguageRaw()).isEqualTo("Python");
     }
   }
 
@@ -551,12 +553,12 @@ class EnrichServiceTest {
                   .setComplete(true))
               .build()));
 
-      assertNull(result.error(), "RPC must be OK: " + result.error());
-      assertEquals(1, vlm.requests.size());
-      assertTrue(vlm.requests.get(0).hasImage());
-      assertEquals("<formula>", vlm.requests.get(0).prompt());
-      assertEquals(2048, vlm.requests.get(0).maxTokens());
-      assertEquals("x^2 + y^2", annotations(result).get(0).getFormula().getText());
+      assertThat(result.error()).as("RPC must be OK: " + result.error()).isNull();
+      assertThat(vlm.requests.size()).isEqualTo(1);
+      assertThat(vlm.requests.get(0).hasImage()).isTrue();
+      assertThat(vlm.requests.get(0).prompt()).isEqualTo("<formula>");
+      assertThat(vlm.requests.get(0).maxTokens()).isEqualTo(2048);
+      assertThat(annotations(result).get(0).getFormula().getText()).isEqualTo("x^2 + y^2");
     }
   }
 
@@ -580,12 +582,12 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
+      assertThat(result.error()).isNull();
       var patched = result.events().get(result.events().size() - 1)
           .getComplete().getDocument().getTexts(0).getCode();
-      assertEquals("int x = 1;", patched.getText());
-      assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_JAVA, patched.getCodeLanguage());
-      assertEquals("Java", patched.getCodeLanguageRaw());
+      assertThat(patched.getText()).isEqualTo("int x = 1;");
+      assertThat(patched.getCodeLanguage()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_JAVA);
+      assertThat(patched.getCodeLanguageRaw()).isEqualTo("Java");
     }
   }
 
@@ -613,11 +615,11 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertEquals(1, skips(result).size());
-      assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
-          skips(result).get(0).getReason());
-      assertTrue(vlm.requests.isEmpty());
+      assertThat(result.error()).isNull();
+      assertThat(skips(result).size()).isEqualTo(1);
+      assertThat(skips(result).get(0).getReason())
+          .isEqualTo(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD);
+      assertThat(vlm.requests).isEmpty();
     }
   }
 
@@ -650,11 +652,11 @@ class EnrichServiceTest {
           .setDocument(documentWithSmallPicture(200))
           .build();
       Collected skippedResult = runRpc(stub, List.of(optionsRequest(small)));
-      assertNull(skippedResult.error());
-      assertEquals(1, skips(skippedResult).size());
-      assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
-          skips(skippedResult).get(0).getReason());
-      assertTrue(vlm.requests.isEmpty());
+      assertThat(skippedResult.error()).isNull();
+      assertThat(skips(skippedResult).size()).isEqualTo(1);
+      assertThat(skips(skippedResult).get(0).getReason())
+          .isEqualTo(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD);
+      assertThat(vlm.requests).isEmpty();
 
       // 300x300 = 9% >= 0.05: described.
       EnrichOptions big = EnrichOptions.newBuilder()
@@ -662,8 +664,8 @@ class EnrichServiceTest {
           .setDocument(documentWithSmallPicture(300))
           .build();
       Collected describedResult = runRpc(stub, List.of(optionsRequest(big)));
-      assertNull(describedResult.error());
-      assertEquals(1, annotations(describedResult).size());
+      assertThat(describedResult.error()).isNull();
+      assertThat(annotations(describedResult).size()).isEqualTo(1);
     }
   }
 
@@ -679,9 +681,9 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertTrue(skips(result).isEmpty());
-      assertEquals(1, annotations(result).size());
+      assertThat(result.error()).isNull();
+      assertThat(skips(result)).isEmpty();
+      assertThat(annotations(result).size()).isEqualTo(1);
     }
   }
 
@@ -713,15 +715,15 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertEquals(1, result.events().get(0).getStarted().getChartExtractions());
-      assertEquals(1, annotations(result).size());
-      assertTrue(annotations(result).get(0).hasChartTable());
-      assertEquals(1, vlm.requests.size());
+      assertThat(result.error()).isNull();
+      assertThat(result.events().get(0).getStarted().getChartExtractions()).isEqualTo(1);
+      assertThat(annotations(result).size()).isEqualTo(1);
+      assertThat(annotations(result).get(0).hasChartTable()).isTrue();
+      assertThat(vlm.requests.size()).isEqualTo(1);
       // The pinned chart prompt and the chart generation budget.
-      assertEquals("Convert the information in this chart into a data table in CSV format.",
-          vlm.requests.get(0).prompt());
-      assertEquals(4096, vlm.requests.get(0).maxTokens());
+      assertThat(vlm.requests.get(0).prompt())
+          .isEqualTo("Convert the information in this chart into a data table in CSV format.");
+      assertThat(vlm.requests.get(0).maxTokens()).isEqualTo(4096);
     }
   }
 
@@ -742,11 +744,11 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertEquals(0, result.events().get(0).getStarted().getChartExtractions());
-      assertEquals(1, result.events().get(0).getStarted().getPictureDescriptions());
-      assertEquals(1, annotations(result).size());
-      assertTrue(annotations(result).get(0).hasDescription());
+      assertThat(result.error()).isNull();
+      assertThat(result.events().get(0).getStarted().getChartExtractions()).isEqualTo(0);
+      assertThat(result.events().get(0).getStarted().getPictureDescriptions()).isEqualTo(1);
+      assertThat(annotations(result).size()).isEqualTo(1);
+      assertThat(annotations(result).get(0).hasDescription()).isTrue();
     }
   }
 
@@ -763,10 +765,10 @@ class EnrichServiceTest {
           .setDocument(documentOnePictureOneParagraph())
           .build();
       Collected smolvlmResult = runRpc(stub, List.of(optionsRequest(smolvlm)));
-      assertNull(smolvlmResult.error());
-      assertEquals("Describe this image in a few sentences.",
-          vlm.requests.get(vlm.requests.size() - 1).prompt());
-      assertEquals(200, vlm.requests.get(vlm.requests.size() - 1).maxTokens());
+      assertThat(smolvlmResult.error()).isNull();
+      assertThat(vlm.requests.get(vlm.requests.size() - 1).prompt())
+          .isEqualTo("Describe this image in a few sentences.");
+      assertThat(vlm.requests.get(vlm.requests.size() - 1).maxTokens()).isEqualTo(200);
 
       EnrichOptions granite = EnrichOptions.newBuilder()
           .setDoPictureDescription(true)
@@ -775,9 +777,9 @@ class EnrichServiceTest {
           .setDocument(documentOnePictureOneParagraph())
           .build();
       Collected graniteResult = runRpc(stub, List.of(optionsRequest(granite)));
-      assertNull(graniteResult.error());
-      assertEquals("What is shown in this image?",
-          vlm.requests.get(vlm.requests.size() - 1).prompt());
+      assertThat(graniteResult.error()).isNull();
+      assertThat(vlm.requests.get(vlm.requests.size() - 1).prompt())
+          .isEqualTo("What is shown in this image?");
     }
   }
 
@@ -793,15 +795,15 @@ class EnrichServiceTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
+      assertThat(result.error()).isNull();
       var complete = result.events().get(result.events().size() - 1).getComplete();
-      assertTrue(complete.hasDocument());
+      assertThat(complete.hasDocument()).isTrue();
       var picture = complete.getDocument().getPictures(0);
-      assertEquals(1, picture.getAnnotationsCount());
-      assertEquals("a QR code", picture.getAnnotations(0).getDescription().getText());
+      assertThat(picture.getAnnotationsCount()).isEqualTo(1);
+      assertThat(picture.getAnnotations(0).getDescription().getText()).isEqualTo("a QR code");
       // The paragraph is untouched.
-      assertEquals("a paragraph", complete.getDocument().getTexts(0).getText().getBase()
-          .getText());
+      assertThat(complete.getDocument().getTexts(0).getText().getBase()
+          .getText()).isEqualTo("a paragraph");
     }
   }
 
@@ -825,9 +827,10 @@ class EnrichServiceTest {
               .build());
       Collected result = runRpc(stub, requests);
 
-      assertNull(result.error(), "RPC must be OK: " + result.error());
-      assertEquals(1, annotations(result).size());
-      assertEquals("chunked picture", annotations(result).get(0).getDescription().getText());
+      assertThat(result.error()).as("RPC must be OK: " + result.error()).isNull();
+      assertThat(annotations(result).size()).isEqualTo(1);
+      assertThat(annotations(result).get(0).getDescription().getText())
+          .isEqualTo("chunked picture");
     }
   }
 
@@ -842,8 +845,8 @@ class EnrichServiceTest {
       Collected result = runRpc(stub, List.of(EnrichDocumentRequest.newBuilder()
           .setChunk(DocumentChunk.newBuilder().setData(ByteString.copyFromUtf8("x")))
           .build()));
-      assertNotNull(result.error());
-      assertEquals(Status.Code.INVALID_ARGUMENT, result.error().getStatus().getCode());
+      assertThat(result.error()).isNotNull();
+      assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
     }
   }
 
@@ -853,8 +856,8 @@ class EnrichServiceTest {
       EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
       Collected result = runRpc(stub, List.of(
           optionsRequest(EnrichOptions.newBuilder().setDoPictureDescription(true).build())));
-      assertNotNull(result.error());
-      assertEquals(Status.Code.INVALID_ARGUMENT, result.error().getStatus().getCode());
+      assertThat(result.error()).isNotNull();
+      assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
     }
   }
 
@@ -871,7 +874,7 @@ class EnrichServiceTest {
               .build()));
       // Garbage bytes may or may not parse as a proto; if they do parse the
       // enrichment simply finds no items. Only assert the RPC terminates.
-      assertTrue(result.completed() || result.error() != null);
+      assertThat(result.completed() || result.error() != null).isTrue();
     }
   }
 
@@ -885,8 +888,8 @@ class EnrichServiceTest {
           EnrichDocumentRequest.newBuilder()
               .setChunk(DocumentChunk.newBuilder().setData(ByteString.copyFrom(big)))
               .build()));
-      assertNotNull(result.error());
-      assertEquals(Status.Code.RESOURCE_EXHAUSTED, result.error().getStatus().getCode());
+      assertThat(result.error()).isNotNull();
+      assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.RESOURCE_EXHAUSTED);
     }
   }
 
@@ -927,25 +930,25 @@ class EnrichServiceTest {
       // A batched implementation waits for onCompleted before doing anything;
       // this test fails if the stream ever works that way.
       Object first = inbox.poll(10, TimeUnit.SECONDS);
-      assertNotNull(first, "no event arrived before the client half-closed");
-      assertTrue(first instanceof EnrichDocumentResponse event && event.hasStarted(),
-          "first event must be EnrichStarted, got: " + first);
+      assertThat(first).as("no event arrived before the client half-closed").isNotNull();
+      assertThat(first instanceof EnrichDocumentResponse event && event.hasStarted())
+          .as("first event must be EnrichStarted, got: " + first).isTrue();
 
       EnrichDocumentResponse complete = null;
       while (complete == null) {
         Object item = inbox.poll(10, TimeUnit.SECONDS);
-        assertNotNull(item, "EnrichComplete never arrived");
-        assertTrue(item instanceof EnrichDocumentResponse, "RPC failed: " + item);
+        assertThat(item).as("EnrichComplete never arrived").isNotNull();
+        assertThat(item instanceof EnrichDocumentResponse).as("RPC failed: " + item).isTrue();
         EnrichDocumentResponse event = (EnrichDocumentResponse) item;
         if (event.hasComplete()) {
           complete = event;
         }
       }
-      assertEquals(1, complete.getComplete().getSucceeded());
+      assertThat(complete.getComplete().getSucceeded()).isEqualTo(1);
 
       // The server completes the response once the trailer is emitted, even
       // though the client never half-closed.
-      assertEquals("DONE", inbox.poll(10, TimeUnit.SECONDS));
+      assertThat(inbox.poll(10, TimeUnit.SECONDS)).isEqualTo("DONE");
       try {
         requester.onCompleted();
       } catch (StatusRuntimeException alreadyClosed) {
@@ -1004,10 +1007,10 @@ class EnrichServiceTest {
           sawAnnotationBeforeRelease = true;
           break;
         }
-        assertFalse(item instanceof StatusRuntimeException, "RPC failed: " + item);
+        assertThat(item instanceof StatusRuntimeException).as("RPC failed: " + item).isFalse();
       }
-      assertTrue(sawAnnotationBeforeRelease,
-          "no per-item event arrived while a later VLM call was still in flight");
+      assertThat(sawAnnotationBeforeRelease)
+          .as("no per-item event arrived while a later VLM call was still in flight").isTrue();
       secondCallGate.countDown();
 
       // Now the rest drains: a second annotation, then the trailer.
@@ -1015,19 +1018,20 @@ class EnrichServiceTest {
       boolean completed = false;
       while (!completed) {
         Object item = inbox.poll(10, TimeUnit.SECONDS);
-        assertNotNull(item, "RPC did not finish after the gate opened");
+        assertThat(item).as("RPC did not finish after the gate opened").isNotNull();
         if (item instanceof EnrichDocumentResponse event) {
           if (event.hasAnnotation()) {
             annotations++;
           }
           if (event.hasComplete()) {
-            assertEquals(2, event.getComplete().getSucceeded());
+            assertThat(event.getComplete().getSucceeded()).isEqualTo(2);
           }
         } else {
           completed = true;
         }
       }
-      assertEquals(1, annotations, "exactly one annotation remained after the gate opened");
+      assertThat(annotations).as("exactly one annotation remained after the gate opened")
+          .isEqualTo(1);
     }
   }
 }

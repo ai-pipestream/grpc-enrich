@@ -1,9 +1,6 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
@@ -111,7 +108,7 @@ class EnrichStreamAdversarialTest {
     List<EnrichDocumentResponse> events = new ArrayList<>();
     while (true) {
       Object item = inbox.poll(30, TimeUnit.SECONDS);
-      assertNotNull(item, "RPC did not terminate within 30s");
+      assertThat(item).as("RPC did not terminate within 30s").isNotNull();
       if (item instanceof EnrichDocumentResponse event) {
         events.add(event);
       } else if (item instanceof StatusRuntimeException error) {
@@ -179,23 +176,23 @@ class EnrichStreamAdversarialTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertTrue(result.completed());
+      assertThat(result.error()).isNull();
+      assertThat(result.completed()).isTrue();
       List<ItemAnnotation> annotations = annotations(result);
-      assertEquals(50, annotations.size());
+      assertThat(annotations.size()).isEqualTo(50);
       // Event order across items is not contractual, even at concurrency 1
       // (the proto and engine javadoc both say out-of-order is legal): the
       // guarantee is exactly one annotation per selected item.
-      assertEquals(50, annotations.stream().map(ItemAnnotation::getSelfRef)
-          .distinct().count());
+      assertThat(annotations.stream().map(ItemAnnotation::getSelfRef)
+          .distinct().count()).isEqualTo(50);
       for (int i = 0; i < 50; i++) {
         int index = i;
-        assertTrue(annotations.stream()
-            .anyMatch(a -> a.getSelfRef().equals("#/pictures/" + index)));
+        assertThat(annotations.stream()
+            .anyMatch(a -> a.getSelfRef().equals("#/pictures/" + index))).isTrue();
       }
-      assertEquals(50, complete(result).getComplete().getSucceeded());
-      assertEquals(0, complete(result).getComplete().getFailed());
-      assertEquals(50, vlm.requests.size());
+      assertThat(complete(result).getComplete().getSucceeded()).isEqualTo(50);
+      assertThat(complete(result).getComplete().getFailed()).isEqualTo(0);
+      assertThat(vlm.requests.size()).isEqualTo(50);
     }
   }
 
@@ -211,16 +208,16 @@ class EnrichStreamAdversarialTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertTrue(result.completed());
-      assertEquals(50, annotations(result).size());
-      assertEquals(50, annotations(result).stream().map(ItemAnnotation::getSelfRef)
-          .distinct().count());
-      assertEquals(50, complete(result).getComplete().getSucceeded());
-      assertEquals(0, complete(result).getComplete().getFailed());
+      assertThat(result.error()).isNull();
+      assertThat(result.completed()).isTrue();
+      assertThat(annotations(result).size()).isEqualTo(50);
+      assertThat(annotations(result).stream().map(ItemAnnotation::getSelfRef)
+          .distinct().count()).isEqualTo(50);
+      assertThat(complete(result).getComplete().getSucceeded()).isEqualTo(50);
+      assertThat(complete(result).getComplete().getFailed()).isEqualTo(0);
       // Exactly one terminal complete event, and it is the last event.
-      assertTrue(result.events().get(result.events().size() - 1).hasComplete());
-      assertEquals(50, vlm.requests.size());
+      assertThat(result.events().get(result.events().size() - 1).hasComplete()).isTrue();
+      assertThat(vlm.requests.size()).isEqualTo(50);
     }
   }
 
@@ -237,12 +234,12 @@ class EnrichStreamAdversarialTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertTrue(result.completed());
-      assertEquals(1, skips(result).size());
-      assertEquals(ai.pipestream.enrich.v1.SkipReason.SKIP_REASON_VLM_ERROR,
-          skips(result).get(0).getReason());
-      assertEquals(1, complete(result).getComplete().getSkipped());
+      assertThat(result.error()).isNull();
+      assertThat(result.completed()).isTrue();
+      assertThat(skips(result).size()).isEqualTo(1);
+      assertThat(skips(result).get(0).getReason())
+          .isEqualTo(ai.pipestream.enrich.v1.SkipReason.SKIP_REASON_VLM_ERROR);
+      assertThat(complete(result).getComplete().getSkipped()).isEqualTo(1);
       never.countDown();
     }
   }
@@ -270,17 +267,16 @@ class EnrichStreamAdversarialTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertEquals(2, annotations(result).size());
+      assertThat(result.error()).isNull();
+      assertThat(annotations(result).size()).isEqualTo(2);
       Document patched = complete(result).getComplete().getDocument();
       // Which picture's call returned first is not deterministic, but each
       // picture must carry ITS OWN annotation: the two responses must land
       // one-per-picture, never both collapsed onto the last one.
-      assertEquals(
-          java.util.Set.of("description 0", "description 1"),
-          java.util.Set.of(
+      assertThat(java.util.Set.of(
               patched.getPictures(0).getAnnotations(0).getDescription().getText(),
-              patched.getPictures(1).getAnnotations(0).getDescription().getText()));
+              patched.getPictures(1).getAnnotations(0).getDescription().getText()))
+          .isEqualTo(java.util.Set.of("description 0", "description 1"));
     }
   }
 
@@ -300,10 +296,10 @@ class EnrichStreamAdversarialTest {
           .build();
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
 
-      assertNull(result.error());
-      assertTrue(result.completed());
-      assertEquals(3, annotations(result).size());
-      assertEquals(0, complete(result).getComplete().getFailed());
+      assertThat(result.error()).isNull();
+      assertThat(result.completed()).isTrue();
+      assertThat(annotations(result).size()).isEqualTo(3);
+      assertThat(complete(result).getComplete().getFailed()).isEqualTo(0);
     }
   }
 
@@ -342,16 +338,16 @@ class EnrichStreamAdversarialTest {
                 }
               });
       requester.onNext(optionsRequest(options));
-      assertTrue(firstEvent.await(10, TimeUnit.SECONDS));
+      assertThat(firstEvent.await(10, TimeUnit.SECONDS)).isTrue();
       requester.cancel("test cancellation", null);
-      assertTrue(terminated.await(10, TimeUnit.SECONDS),
-          "server never noticed the cancellation");
+      assertThat(terminated.await(10, TimeUnit.SECONDS)).as("server never noticed the cancellation")
+          .isTrue();
 
       // The server must not be wedged: a fresh RPC works normally.
       Collected result = runRpc(stub, List.of(optionsRequest(options)));
-      assertNull(result.error());
-      assertTrue(result.completed());
-      assertEquals(10, annotations(result).size());
+      assertThat(result.error()).isNull();
+      assertThat(result.completed()).isTrue();
+      assertThat(annotations(result).size()).isEqualTo(10);
     }
   }
 
@@ -368,8 +364,8 @@ class EnrichStreamAdversarialTest {
         .build();
     Collected result = runRpc(stub,
         List.of(optionsRequest(options), optionsRequest(options)));
-    assertNotNull(result.error());
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.error().getStatus().getCode());
+    assertThat(result.error()).isNotNull();
+    assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   @Test
@@ -380,16 +376,16 @@ class EnrichStreamAdversarialTest {
             .setData(ByteString.copyFromUtf8("x"))
             .setComplete(true))
         .build()));
-    assertNotNull(result.error());
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.error().getStatus().getCode());
+    assertThat(result.error()).isNotNull();
+    assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   @Test
   void emptyStream_invalidArgument() throws Exception {
     EnrichServiceGrpc.EnrichServiceStub stub = startService("");
     Collected result = runRpc(stub, List.of());
-    assertNotNull(result.error());
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.error().getStatus().getCode());
+    assertThat(result.error()).isNotNull();
+    assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   @Test
@@ -397,8 +393,8 @@ class EnrichStreamAdversarialTest {
     EnrichServiceGrpc.EnrichServiceStub stub = startService("");
     Collected result = runRpc(stub, List.of(optionsRequest(
         EnrichOptions.newBuilder().setDoPictureDescription(true).build())));
-    assertNotNull(result.error());
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.error().getStatus().getCode());
+    assertThat(result.error()).isNotNull();
+    assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   @Test
@@ -416,8 +412,8 @@ class EnrichStreamAdversarialTest {
           EnrichDocumentRequest.newBuilder().setChunk(DocumentChunk.newBuilder()
               .setData(ByteString.copyFromUtf8("late")).setComplete(true)).build());
       Collected result = runRpc(stub, requests);
-      assertNotNull(result.error());
-      assertEquals(Status.Code.INVALID_ARGUMENT, result.error().getStatus().getCode());
+      assertThat(result.error()).isNotNull();
+      assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
     }
   }
 
@@ -451,9 +447,9 @@ class EnrichStreamAdversarialTest {
           optionsRequest(options),
           EnrichDocumentRequest.newBuilder().setChunk(DocumentChunk.newBuilder()
               .setData(ByteString.copyFrom(documentBytes)).setComplete(true)).build()));
-      assertNull(result.error());
-      assertTrue(result.completed());
-      assertEquals(1, annotations(result).size());
+      assertThat(result.error()).isNull();
+      assertThat(result.completed()).isTrue();
+      assertThat(annotations(result).size()).isEqualTo(1);
     }
   }
 }

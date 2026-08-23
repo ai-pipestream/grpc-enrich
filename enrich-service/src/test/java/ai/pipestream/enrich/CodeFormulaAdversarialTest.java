@@ -1,6 +1,6 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.pipestream.document.v1.CodeLanguageLabel;
 import ai.pipestream.enrich.engine.CodeFormulaPostProcessor;
@@ -19,97 +19,96 @@ class CodeFormulaAdversarialTest {
   void sentinelInsideLegitimateCode_isStripped() {
     // The sentinel list applies unconditionally; code that literally
     // prints the sentinel loses it. Surprising but deliberate — pinned as-is.
-    assertEquals("print(\"\")",
-        CodeFormulaPostProcessor.clean("print(\"</code>\")"));
+    assertThat(CodeFormulaPostProcessor.clean("print(\"</code>\")")).isEqualTo("print(\"\")");
   }
 
   @Test
   void multipleEndOfUtteranceMarkers_truncateAtFirst() {
-    assertEquals("a", CodeFormulaPostProcessor.clean(
-        "a<end_of_utterance>b<end_of_utterance>c"));
+    assertThat(CodeFormulaPostProcessor.clean(
+        "a<end_of_utterance>b<end_of_utterance>c")).isEqualTo("a");
   }
 
   @Test
   void unterminatedEndOfUtterance_stillTruncates() {
-    assertEquals("code", CodeFormulaPostProcessor.clean("code<end_of_utterance"));
+    assertThat(CodeFormulaPostProcessor.clean("code<end_of_utterance")).isEqualTo("code");
   }
 
   @Test
   void languageTokenNotAtStart_notParsed() {
     CodeResult result = CodeFormulaPostProcessor.processCode("x = 1 <_Python_> y = 2");
-    assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_UNKNOWN, result.language());
-    assertEquals("", result.languageRaw());
-    assertEquals("x = 1 <_Python_> y = 2", result.text());
+    assertThat(result.language()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_UNKNOWN);
+    assertThat(result.languageRaw()).isEqualTo("");
+    assertThat(result.text()).isEqualTo("x = 1 <_Python_> y = 2");
   }
 
   @Test
   void languageTokenWithNoBody() {
     CodeResult result = CodeFormulaPostProcessor.processCode("<_Python_>");
-    assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON, result.language());
-    assertEquals("Python", result.languageRaw());
-    assertEquals("", result.text());
+    assertThat(result.language()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON);
+    assertThat(result.languageRaw()).isEqualTo("Python");
+    assertThat(result.text()).isEqualTo("");
   }
 
   @Test
   void languageTokenImmediatelyFollowedByCode() {
     // The token regex allows zero whitespace between token and body.
     CodeResult result = CodeFormulaPostProcessor.processCode("<_Python_>print(1)");
-    assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON, result.language());
-    assertEquals("print(1)", result.text());
+    assertThat(result.language()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON);
+    assertThat(result.text()).isEqualTo("print(1)");
   }
 
   @Test
   void emptyLanguageToken_notParsed() {
     CodeResult result = CodeFormulaPostProcessor.processCode("<__>print(1)");
-    assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_UNKNOWN, result.language());
-    assertEquals("<__>print(1)", result.text());
+    assertThat(result.language()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_UNKNOWN);
+    assertThat(result.text()).isEqualTo("<__>print(1)");
   }
 
   @Test
   void languageTokenWithSymbols_cPlusPlus() {
     CodeResult result = CodeFormulaPostProcessor.processCode("<_C++_>int main() {}");
-    assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_C_PLUS_PLUS, result.language());
+    assertThat(result.language()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_C_PLUS_PLUS);
   }
 
   @Test
   void unicodeCode_survives() {
     String code = "print('héllo 😀 漢字')";
     CodeResult result = CodeFormulaPostProcessor.processCode("<_Python_>\n" + code);
-    assertEquals(code, result.text());
+    assertThat(result.text()).isEqualTo(code);
   }
 
   @Test
   void veryLongOutput_processes() {
     String code = "x = 1\n".repeat(100_000);
     CodeResult result = CodeFormulaPostProcessor.processCode("<_Python_>\n" + code);
-    assertEquals(code.stripLeading(), result.text());
+    assertThat(result.text()).isEqualTo(code.stripLeading());
   }
 
   @Test
   void emptyResponse_staysEmpty() {
-    assertEquals("", CodeFormulaPostProcessor.clean(""));
+    assertThat(CodeFormulaPostProcessor.clean("")).isEqualTo("");
     CodeResult result = CodeFormulaPostProcessor.processCode("");
-    assertEquals("", result.text());
-    assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_UNKNOWN, result.language());
+    assertThat(result.text()).isEqualTo("");
+    assertThat(result.language()).isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_UNKNOWN);
   }
 
   @Test
   void onlySentinels_cleansToEmpty() {
-    assertEquals("", CodeFormulaPostProcessor.clean("</code></formula>"
-        + "<loc_0><loc_0><loc_500><loc_500><end_of_utterance>"));
+    assertThat(CodeFormulaPostProcessor.clean("</code></formula>"
+        + "<loc_0><loc_0><loc_500><loc_500><end_of_utterance>")).isEqualTo("");
   }
 
   @Test
   void formulaSentinelStrippedButNotLanguageToken() {
     // Formulas never get a language token: a leading <_..._> stays in text.
-    assertEquals("<_Latex_> x^2",
-        CodeFormulaPostProcessor.processFormula("<_Latex_> x^2</formula>"));
+    assertThat(CodeFormulaPostProcessor.processFormula("<_Latex_> x^2</formula>"))
+        .isEqualTo("<_Latex_> x^2");
   }
 
   @Test
   void locSentinelVariant_notStrippedUnlessExact() {
     // Only the exact loc sentinel string is removed.
-    assertEquals("<loc_1><loc_2><loc_3><loc_4>",
-        CodeFormulaPostProcessor.clean("<loc_1><loc_2><loc_3><loc_4>"));
+    assertThat(CodeFormulaPostProcessor.clean("<loc_1><loc_2><loc_3><loc_4>"))
+        .isEqualTo("<loc_1><loc_2><loc_3><loc_4>");
   }
 }

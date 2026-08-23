@@ -1,9 +1,7 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import ai.pipestream.document.v1.TableData;
 import ai.pipestream.enrich.engine.ChartCsvParser;
@@ -16,23 +14,23 @@ class ChartCsvParserTest {
   @Test
   void twoByThreeTable() throws Exception {
     TableData table = ChartCsvParser.parse("a,b,c\n1,2,3");
-    assertEquals(2, table.getNumRows());
-    assertEquals(3, table.getNumCols());
-    assertEquals(6, table.getTableCellsCount());
-    assertTrue(table.getTableCells(0).getColumnHeader());
-    assertEquals("a", table.getTableCells(0).getText());
-    assertEquals("3", table.getTableCells(5).getText());
-    assertEquals(1, table.getTableCells(5).getStartRowOffsetIdx());
-    assertEquals(2, table.getTableCells(5).getStartColOffsetIdx());
-    assertEquals(2, table.getGridCount());
-    assertEquals(3, table.getGrid(1).getCellsCount());
+    assertThat(table.getNumRows()).isEqualTo(2);
+    assertThat(table.getNumCols()).isEqualTo(3);
+    assertThat(table.getTableCellsCount()).isEqualTo(6);
+    assertThat(table.getTableCells(0).getColumnHeader()).isTrue();
+    assertThat(table.getTableCells(0).getText()).isEqualTo("a");
+    assertThat(table.getTableCells(5).getText()).isEqualTo("3");
+    assertThat(table.getTableCells(5).getStartRowOffsetIdx()).isEqualTo(1);
+    assertThat(table.getTableCells(5).getStartColOffsetIdx()).isEqualTo(2);
+    assertThat(table.getGridCount()).isEqualTo(2);
+    assertThat(table.getGrid(1).getCellsCount()).isEqualTo(3);
   }
 
   @Test
   void quotedFieldsWithCommasAndQuotes() throws Exception {
     TableData table = ChartCsvParser.parse("label,value\n\"a, b\",\"say \"\"hi\"\"\"");
-    assertEquals("a, b", table.getTableCells(2).getText());
-    assertEquals("say \"hi\"", table.getTableCells(3).getText());
+    assertThat(table.getTableCells(2).getText()).isEqualTo("a, b");
+    assertThat(table.getTableCells(3).getText()).isEqualTo("say \"hi\"");
   }
 
   @Test
@@ -40,10 +38,10 @@ class ChartCsvParserTest {
     // The first row is a header only when ALL its values are
     // non-numeric, so an all-numeric table has no header cells at all.
     TableData table = ChartCsvParser.parse("2023,10\n2024,12");
-    assertEquals(2, table.getNumRows());
+    assertThat(table.getNumRows()).isEqualTo(2);
     for (int i = 0; i < table.getTableCellsCount(); i++) {
-      assertFalse(table.getTableCells(i).getColumnHeader(), "cell " + i);
-      assertFalse(table.getTableCells(i).getRowHeader(), "cell " + i);
+      assertThat(table.getTableCells(i).getColumnHeader()).as("cell " + i).isFalse();
+      assertThat(table.getTableCells(i).getRowHeader()).as("cell " + i).isFalse();
     }
   }
 
@@ -51,39 +49,39 @@ class ChartCsvParserTest {
   void mixedFirstRow_noHeaderRow() throws Exception {
     // One numeric value in the first row is enough to demote it to data.
     TableData table = ChartCsvParser.parse("year,2023\nsales,10");
-    assertFalse(table.getTableCells(0).getColumnHeader());
-    assertTrue(table.getTableCells(0).getRowHeader(), "non-numeric data cell");
-    assertFalse(table.getTableCells(1).getRowHeader(), "numeric data cell");
+    assertThat(table.getTableCells(0).getColumnHeader()).isFalse();
+    assertThat(table.getTableCells(0).getRowHeader()).as("non-numeric data cell").isTrue();
+    assertThat(table.getTableCells(1).getRowHeader()).as("numeric data cell").isFalse();
   }
 
   @Test
   void nonNumericDataCellsAreRowHeaders() throws Exception {
     TableData table = ChartCsvParser.parse("region,sales\nnorth,10\nsouth,20");
-    assertTrue(table.getTableCells(0).getColumnHeader());
-    assertTrue(table.getTableCells(1).getColumnHeader());
-    assertTrue(table.getTableCells(2).getRowHeader(), "north");
-    assertFalse(table.getTableCells(2).getColumnHeader());
-    assertFalse(table.getTableCells(3).getRowHeader(), "10");
-    assertTrue(table.getTableCells(4).getRowHeader(), "south");
-    assertFalse(table.getTableCells(5).getRowHeader(), "20");
+    assertThat(table.getTableCells(0).getColumnHeader()).isTrue();
+    assertThat(table.getTableCells(1).getColumnHeader()).isTrue();
+    assertThat(table.getTableCells(2).getRowHeader()).as("north").isTrue();
+    assertThat(table.getTableCells(2).getColumnHeader()).isFalse();
+    assertThat(table.getTableCells(3).getRowHeader()).as("10").isFalse();
+    assertThat(table.getTableCells(4).getRowHeader()).as("south").isTrue();
+    assertThat(table.getTableCells(5).getRowHeader()).as("20").isFalse();
   }
 
   @Test
   void emptyCellIsNonNumericRowHeader() throws Exception {
     // Empty cells count as non-numeric: text "" and row_header=true.
     TableData table = ChartCsvParser.parse("a,b\n,5");
-    assertEquals("", table.getTableCells(2).getText());
-    assertTrue(table.getTableCells(2).getRowHeader());
-    assertFalse(table.getTableCells(3).getRowHeader());
+    assertThat(table.getTableCells(2).getText()).isEqualTo("");
+    assertThat(table.getTableCells(2).getRowHeader()).isTrue();
+    assertThat(table.getTableCells(3).getRowHeader()).isFalse();
   }
 
   @Test
   void emptyInputRejected() {
-    assertThrows(VlmException.class, () -> ChartCsvParser.parse(""));
+    assertThatThrownBy(() -> ChartCsvParser.parse("")).isInstanceOf(VlmException.class);
   }
 
   @Test
   void raggedRowsRejected() {
-    assertThrows(VlmException.class, () -> ChartCsvParser.parse("a,b,c\n1,2"));
+    assertThatThrownBy(() -> ChartCsvParser.parse("a,b,c\n1,2")).isInstanceOf(VlmException.class);
   }
 }

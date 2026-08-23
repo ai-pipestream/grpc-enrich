@@ -1,8 +1,7 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
@@ -177,25 +176,26 @@ class EnrichHttpServerTest {
       vlm.responder = body -> "a QR code on a white background";
       Fixture fixture = startHttp(vlm.url());
 
-      HttpResponse<String> response =
-          post(fixture.base() + "/v1/enrich", envelope(describeOptions(documentOnePictureOneParagraph())));
+      HttpResponse<String> response = post(fixture.base() + "/v1/enrich",
+          envelope(describeOptions(documentOnePictureOneParagraph())));
 
-      assertEquals(200, response.statusCode(), response.body());
+      assertThat(response.statusCode()).as("%s", response.body()).isEqualTo(200);
       JsonArray events =
           JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonArray("events");
-      assertEquals(3, events.size(), response.body());
-      assertTrue(events.get(0).getAsJsonObject().has("started"), "first event is EnrichStarted");
-      assertEquals(1, events.get(0).getAsJsonObject().getAsJsonObject("started")
-          .get("pictureDescriptions").getAsInt());
+      assertThat(events.size()).as("%s", response.body()).isEqualTo(3);
+      assertThat(events.get(0).getAsJsonObject().has("started")).as("first event is EnrichStarted")
+          .isTrue();
+      assertThat(events.get(0).getAsJsonObject().getAsJsonObject("started")
+          .get("pictureDescriptions").getAsInt()).isEqualTo(1);
       JsonObject annotation = events.get(1).getAsJsonObject().getAsJsonObject("annotation");
-      assertNotNull(annotation, "second event is the ItemAnnotation");
-      assertEquals("#/pictures/0", annotation.get("selfRef").getAsString());
-      assertEquals("a QR code on a white background",
-          annotation.getAsJsonObject("description").get("text").getAsString());
+      assertThat(annotation).as("second event is the ItemAnnotation").isNotNull();
+      assertThat(annotation.get("selfRef").getAsString()).isEqualTo("#/pictures/0");
+      assertThat(annotation.getAsJsonObject("description").get("text").getAsString())
+          .isEqualTo("a QR code on a white background");
       JsonObject complete = events.get(2).getAsJsonObject().getAsJsonObject("complete");
-      assertNotNull(complete, "last event is the EnrichComplete trailer");
-      assertEquals(1, complete.get("succeeded").getAsInt());
-      assertEquals(1, vlm.requests.size());
+      assertThat(complete).as("last event is the EnrichComplete trailer").isNotNull();
+      assertThat(complete.get("succeeded").getAsInt()).isEqualTo(1);
+      assertThat(vlm.requests.size()).isEqualTo(1);
     }
   }
 
@@ -204,8 +204,8 @@ class EnrichHttpServerTest {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
       Fixture fixture = startHttp(vlm.url());
       HttpResponse<String> response = post(fixture.base() + "/v1/enrich", "{not json");
-      assertEquals(400, response.statusCode());
-      assertTrue(response.body().contains("\"error\""), response.body());
+      assertThat(response.statusCode()).isEqualTo(400);
+      assertThat(response.body()).as("%s", response.body()).contains("\"error\"");
     }
   }
 
@@ -215,8 +215,8 @@ class EnrichHttpServerTest {
       Fixture fixture = startHttp(vlm.url());
       HttpResponse<String> response =
           post(fixture.base() + "/v1/enrich", "{\"options\":{\"doPictureDescription\":true}}");
-      assertEquals(400, response.statusCode(), response.body());
-      assertTrue(response.body().contains("without a document"), response.body());
+      assertThat(response.statusCode()).as("%s", response.body()).isEqualTo(400);
+      assertThat(response.body()).as("%s", response.body()).contains("without a document");
     }
   }
 
@@ -228,8 +228,8 @@ class EnrichHttpServerTest {
       HttpResponse<String> response = post(fixture.base() + "/v1/enrich",
           envelope(EnrichOptions.newBuilder().setDoPictureDescription(true).build(),
               documentOnePictureOneParagraph()));
-      assertEquals(413, response.statusCode(), response.body());
-      assertTrue(response.body().contains("byte cap"), response.body());
+      assertThat(response.statusCode()).as("%s", response.body()).isEqualTo(413);
+      assertThat(response.body()).as("%s", response.body()).contains("byte cap");
     }
   }
 
@@ -240,15 +240,14 @@ class EnrichHttpServerTest {
   /** Reads one line, failing when none arrives before the deadline. */
   private static String readLine(BufferedReader reader, long deadlineNanos, String what)
       throws Exception {
-    while (System.nanoTime() < deadlineNanos) {
-      if (reader.ready()) {
-        String line = reader.readLine();
-        assertNotNull(line, "stream ended before " + what);
-        return line;
-      }
-      Thread.sleep(5);
-    }
-    throw new AssertionError("no line arrived within the deadline waiting for " + what);
+    await("a line for " + what)
+        .atMost(Duration.ofNanos(Math.max(1, deadlineNanos - System.nanoTime())))
+        .pollDelay(Duration.ZERO)
+        .pollInterval(Duration.ofMillis(5))
+        .until(reader::ready);
+    String line = reader.readLine();
+    assertThat(line).as("stream ended before " + what).isNotNull();
+    return line;
   }
 
   @Test
@@ -270,28 +269,28 @@ class EnrichHttpServerTest {
           HttpRequest.newBuilder(URI.create(fixture.base() + "/v1/enrich/stream"))
               .POST(HttpRequest.BodyPublishers.ofString(envelope(options))).build(),
           HttpResponse.BodyHandlers.ofInputStream());
-      assertEquals(200, response.statusCode());
+      assertThat(response.statusCode()).isEqualTo(200);
 
       BufferedReader reader = new BufferedReader(
           new InputStreamReader(response.body(), StandardCharsets.UTF_8));
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
       String started = readLine(reader, deadline, "EnrichStarted");
-      assertTrue(started.contains("\"started\""), started);
+      assertThat(started).as("%s", started).contains("\"started\"");
 
       // The second VLM call is still gated, yet the first item's annotation
       // line must already be flushed to the HTTP client.
       String firstAnnotation = readLine(reader, deadline, "the first ItemAnnotation");
-      assertTrue(firstAnnotation.contains("\"annotation\""), firstAnnotation);
-      assertEquals(1, secondCallGate.getCount(),
-          "the later VLM call must still be blocked when the first line arrived");
+      assertThat(firstAnnotation).as("%s", firstAnnotation).contains("\"annotation\"");
+      assertThat(secondCallGate.getCount())
+          .as("the later VLM call must still be blocked when the first line arrived").isEqualTo(1);
       secondCallGate.countDown();
 
       String secondAnnotation = readLine(reader, deadline, "the second ItemAnnotation");
-      assertTrue(secondAnnotation.contains("\"annotation\""), secondAnnotation);
+      assertThat(secondAnnotation).as("%s", secondAnnotation).contains("\"annotation\"");
       String complete = readLine(reader, deadline, "EnrichComplete");
-      assertTrue(complete.contains("\"complete\""), complete);
-      assertTrue(complete.contains("\"succeeded\":2")
-          || complete.contains("\"succeeded\":\"2\""), complete);
+      assertThat(complete).as("%s", complete).contains("\"complete\"");
+      assertThat(complete).as("%s", complete)
+          .containsAnyOf("\"succeeded\":2", "\"succeeded\":\"2\"");
     }
   }
 
@@ -306,8 +305,8 @@ class EnrichHttpServerTest {
       HttpResponse<String> response = http.send(
           HttpRequest.newBuilder(URI.create(fixture.base() + "/healthz")).GET().build(),
           HttpResponse.BodyHandlers.ofString());
-      assertEquals(200, response.statusCode());
-      assertEquals("ok", response.body());
+      assertThat(response.statusCode()).isEqualTo(200);
+      assertThat(response.body()).isEqualTo("ok");
     }
   }
 
@@ -358,18 +357,19 @@ class EnrichHttpServerTest {
           .setOptions(describeOptions(documentOnePictureOneParagraph())).build());
       requester.onCompleted();
       Object terminal = inbox.poll(30, TimeUnit.SECONDS);
-      assertEquals("DONE", terminal, "gRPC stream failed: " + terminal);
+      assertThat(terminal).as("gRPC stream failed: " + terminal).isEqualTo("DONE");
 
       HttpResponse<String> httpResponse = httpResult.get(30, TimeUnit.SECONDS);
       httpThread.join();
-      assertEquals(200, httpResponse.statusCode(), httpResponse.body());
+      assertThat(httpResponse.statusCode()).as("%s", httpResponse.body()).isEqualTo(200);
 
-      assertTrue(grpcEvents.stream().anyMatch(EnrichDocumentResponse::hasAnnotation),
-          "gRPC stream annotated its picture");
-      assertTrue(httpResponse.body().contains("\"annotation\""),
-          "HTTP request annotated its picture");
-      assertTrue(grpcEvents.stream().anyMatch(EnrichDocumentResponse::hasComplete));
-      assertEquals(2, vlm.requests.size(), "both paths called the VLM exactly once each");
+      assertThat(grpcEvents.stream().anyMatch(EnrichDocumentResponse::hasAnnotation))
+          .as("gRPC stream annotated its picture").isTrue();
+      assertThat(httpResponse.body()).as("HTTP request annotated its picture")
+          .contains("\"annotation\"");
+      assertThat(grpcEvents.stream().anyMatch(EnrichDocumentResponse::hasComplete)).isTrue();
+      assertThat(vlm.requests.size()).as("both paths called the VLM exactly once each")
+          .isEqualTo(2);
     }
   }
 }

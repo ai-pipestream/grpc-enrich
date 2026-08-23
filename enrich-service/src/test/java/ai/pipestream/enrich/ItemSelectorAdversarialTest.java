@@ -1,7 +1,6 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.pipestream.document.v1.BoundingBox;
 import ai.pipestream.document.v1.DocItemLabel;
@@ -75,17 +74,17 @@ class ItemSelectorAdversarialTest {
     // go negative (a negative ratio would always fail) or huge.
     Document document = documentOnPage(picture("#/pictures/0", 800, 800, 200, 200), 1000, 1000);
     Selection selection = describe(document, 0.05);
-    assertEquals(1, selection.work().size());
-    assertTrue(selection.skips().isEmpty());
+    assertThat(selection.work().size()).isEqualTo(1);
+    assertThat(selection.skips()).isEmpty();
   }
 
   @Test
   void zeroAreaBbox_belowThreshold() {
     Document document = documentOnPage(picture("#/pictures/0", 100, 100, 100, 100), 1000, 1000);
     Selection selection = describe(document, 0.05);
-    assertTrue(selection.work().isEmpty());
-    assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
-        selection.skips().get(0).getReason());
+    assertThat(selection.work()).isEmpty();
+    assertThat(selection.skips().get(0).getReason())
+        .isEqualTo(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD);
   }
 
   @Test
@@ -93,7 +92,7 @@ class ItemSelectorAdversarialTest {
     Document document = documentOnPage(picture("#/pictures/0", -500, -500, 500, 500), 1000, 1000);
     // 1000x1000 on a 1000x1000 page = ratio 1.0.
     Selection selection = describe(document, 0.99);
-    assertEquals(1, selection.work().size());
+    assertThat(selection.work().size()).isEqualTo(1);
   }
 
   @Test
@@ -101,16 +100,16 @@ class ItemSelectorAdversarialTest {
     // 500x500 on 1000x1000 = 0.25; == threshold must pass (>= semantics).
     Document document = documentOnPage(picture("#/pictures/0", 0, 0, 500, 500), 1000, 1000);
     Selection selection = describe(document, 0.25);
-    assertEquals(1, selection.work().size());
-    assertTrue(selection.skips().isEmpty());
+    assertThat(selection.work().size()).isEqualTo(1);
+    assertThat(selection.skips()).isEmpty();
   }
 
   @Test
   void epsilonBelowThreshold_skips() {
     Document document = documentOnPage(picture("#/pictures/0", 0, 0, 500, 500), 1000, 1000);
     Selection selection = describe(document, 0.250001);
-    assertTrue(selection.work().isEmpty());
-    assertEquals(1, selection.skips().size());
+    assertThat(selection.work()).isEmpty();
+    assertThat(selection.skips().size()).isEqualTo(1);
   }
 
   @Test
@@ -120,14 +119,14 @@ class ItemSelectorAdversarialTest {
         .addPictures(picture("#/pictures/0", 0, 0, 1, 1)) // tiny, but page 1 unknown
         .build();
     Selection selection = describe(document, 0.99);
-    assertEquals(1, selection.work().size());
+    assertThat(selection.work().size()).isEqualTo(1);
   }
 
   @Test
   void zeroPageSize_treatedAsFullPage() {
     Document document = documentOnPage(picture("#/pictures/0", 0, 0, 1, 1), 0, 0);
     Selection selection = describe(document, 0.99);
-    assertEquals(1, selection.work().size());
+    assertThat(selection.work().size()).isEqualTo(1);
   }
 
   @Test
@@ -140,9 +139,9 @@ class ItemSelectorAdversarialTest {
         .build();
     Document document = documentOnPage(picture, 1000, 1000);
     Selection selection = describe(document, 0.5);
-    assertTrue(selection.work().isEmpty());
-    assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
-        selection.skips().get(0).getReason());
+    assertThat(selection.work()).isEmpty();
+    assertThat(selection.skips().get(0).getReason())
+        .isEqualTo(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD);
   }
 
   @Test
@@ -150,7 +149,7 @@ class ItemSelectorAdversarialTest {
     Document document = documentOnPage(picture("#/pictures/0",
         Double.NaN, Double.NaN, Double.NaN, Double.NaN), 1000, 1000);
     Selection selection = describe(document, 0.99);
-    assertEquals(1, selection.work().size());
+    assertThat(selection.work().size()).isEqualTo(1);
   }
 
   @Test
@@ -160,29 +159,29 @@ class ItemSelectorAdversarialTest {
     // default 0.05 applies — a 4% picture is skipped, a 9% one described.
     Document small = documentOnPage(picture("#/pictures/0", 0, 0, 200, 200), 1000, 1000);
     Selection smallSelection = describeNaN(small);
-    assertEquals(1, smallSelection.skips().size());
-    assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
-        smallSelection.skips().get(0).getReason());
+    assertThat(smallSelection.skips().size()).isEqualTo(1);
+    assertThat(smallSelection.skips().get(0).getReason())
+        .isEqualTo(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD);
 
     Document big = documentOnPage(picture("#/pictures/0", 0, 0, 300, 300), 1000, 1000);
     Selection bigSelection = describeNaN(big);
-    assertEquals(1, bigSelection.work().size());
+    assertThat(bigSelection.work().size()).isEqualTo(1);
   }
 
   @Test
   void hugeThreshold_skipsEverything() {
     Document document = documentOnPage(picture("#/pictures/0", 0, 0, 1000, 1000), 1000, 1000);
     Selection selection = describe(document, 1e9);
-    assertTrue(selection.work().isEmpty());
-    assertEquals(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
-        selection.skips().get(0).getReason());
+    assertThat(selection.work()).isEmpty();
+    assertThat(selection.skips().get(0).getReason())
+        .isEqualTo(SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD);
   }
 
   @Test
   void thresholdAboveOne_skipsEvenFullPagePictures() {
     Document document = documentOnPage(picture("#/pictures/0", 0, 0, 1000, 1000), 1000, 1000);
     Selection selection = describe(document, 1.01);
-    assertTrue(selection.work().isEmpty());
+    assertThat(selection.work()).isEmpty();
   }
 
   @Test
@@ -194,9 +193,9 @@ class ItemSelectorAdversarialTest {
     Document document = documentOnPage(picture, 1000, 1000);
     Selection selection = ItemSelector.select(document, Map.of(),
         EnrichOptions.newBuilder().setDoChartExtraction(true).build());
-    assertTrue(selection.work().isEmpty());
+    assertThat(selection.work()).isEmpty();
     // Not a chart and chart extraction doesn't describe: no skip either.
-    assertTrue(selection.skips().isEmpty());
+    assertThat(selection.skips()).isEmpty();
   }
 
   @Test
@@ -211,7 +210,7 @@ class ItemSelectorAdversarialTest {
     Document document = documentOnPage(picture, 1000, 1000);
     Selection selection = ItemSelector.select(document, Map.of(),
         EnrichOptions.newBuilder().setDoChartExtraction(true).build());
-    assertTrue(selection.work().isEmpty());
+    assertThat(selection.work()).isEmpty();
   }
 
   @Test
@@ -226,8 +225,8 @@ class ItemSelectorAdversarialTest {
     Document document = documentOnPage(picture, 1000, 1000);
     Selection selection = ItemSelector.select(document, Map.of(),
         EnrichOptions.newBuilder().setDoChartExtraction(true).build());
-    assertEquals(1, selection.work().size());
-    assertEquals(ItemSelector.Kind.CHART, selection.work().get(0).kind());
+    assertThat(selection.work().size()).isEqualTo(1);
+    assertThat(selection.work().get(0).kind()).isEqualTo(ItemSelector.Kind.CHART);
   }
 
   @Test
@@ -245,6 +244,6 @@ class ItemSelectorAdversarialTest {
     Document document = documentOnPage(picture, 1000, 1000);
     Selection selection = ItemSelector.select(document, Map.of(),
         EnrichOptions.newBuilder().setDoChartExtraction(true).build());
-    assertTrue(selection.work().isEmpty());
+    assertThat(selection.work()).isEmpty();
   }
 }

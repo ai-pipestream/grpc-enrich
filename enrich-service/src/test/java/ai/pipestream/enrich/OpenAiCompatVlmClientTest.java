@@ -1,8 +1,8 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
@@ -30,8 +30,8 @@ class OpenAiCompatVlmClientTest {
       vlm.statusForCall = call -> call == 1 ? 503 : 200;
       String content = client(vlm).complete("m", "describe", null, 200, Duration.ofSeconds(5));
 
-      assertEquals("fake description", content);
-      assertEquals(2, vlm.requests.size(), "one 503 must trigger exactly one retry");
+      assertThat(content).isEqualTo("fake description");
+      assertThat(vlm.requests.size()).as("one 503 must trigger exactly one retry").isEqualTo(2);
     }
   }
 
@@ -41,9 +41,9 @@ class OpenAiCompatVlmClientTest {
       vlm.statusForCall = call -> 503;
       OpenAiCompatVlmClient client = client(vlm);
 
-      assertThrows(VlmException.class,
-          () -> client.complete("m", "describe", null, 200, Duration.ofSeconds(5)));
-      assertEquals(6, vlm.requests.size(), "1 initial attempt + 5 retries");
+      assertThatThrownBy(() -> client.complete("m", "describe", null, 200, Duration.ofSeconds(5)))
+          .isInstanceOf(VlmException.class);
+      assertThat(vlm.requests.size()).as("1 initial attempt + 5 retries").isEqualTo(6);
     }
   }
 
@@ -53,9 +53,9 @@ class OpenAiCompatVlmClientTest {
       vlm.statusForCall = call -> 400;
       OpenAiCompatVlmClient client = client(vlm);
 
-      assertThrows(VlmException.class,
-          () -> client.complete("m", "describe", null, 200, Duration.ofSeconds(5)));
-      assertEquals(1, vlm.requests.size(), "4xx other than 429 must not retry");
+      assertThatThrownBy(() -> client.complete("m", "describe", null, 200, Duration.ofSeconds(5)))
+          .isInstanceOf(VlmException.class);
+      assertThat(vlm.requests.size()).as("4xx other than 429 must not retry").isEqualTo(1);
     }
   }
 
@@ -68,10 +68,10 @@ class OpenAiCompatVlmClientTest {
     OpenAiCompatVlmClient client =
         new OpenAiCompatVlmClient("http://127.0.0.1:" + closedPort, TINY_BACKOFF);
 
-    VlmException failure = assertThrows(VlmException.class,
+    VlmException failure = catchThrowableOfType(VlmException.class,
         () -> client.complete("m", "describe", null, 200, Duration.ofSeconds(5)));
-    assertTrue(failure.getMessage().contains("failed"),
-        "after 5 retries the connection failure surfaces as a VlmException");
+    assertThat(failure.getMessage())
+        .as("after 5 retries the connection failure surfaces as a VlmException").contains("failed");
   }
 
   @Test
@@ -81,9 +81,9 @@ class OpenAiCompatVlmClientTest {
       vlm.gates = Map.of(1, never);
       OpenAiCompatVlmClient client = client(vlm);
 
-      assertThrows(VlmException.class,
-          () -> client.complete("m", "describe", null, 200, Duration.ofMillis(300)));
-      assertEquals(1, vlm.requests.size(), "a read timeout must not retry");
+      assertThatThrownBy(() -> client.complete("m", "describe", null, 200, Duration.ofMillis(300)))
+          .isInstanceOf(VlmException.class);
+      assertThat(vlm.requests.size()).as("a read timeout must not retry").isEqualTo(1);
     }
   }
 }

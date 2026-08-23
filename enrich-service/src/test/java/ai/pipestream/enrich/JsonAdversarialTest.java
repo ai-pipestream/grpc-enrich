@@ -1,9 +1,7 @@
 package ai.pipestream.enrich;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import ai.pipestream.enrich.vlm.Json;
 import java.util.List;
@@ -24,49 +22,50 @@ class JsonAdversarialTest {
 
   @Test
   void truncatedObject_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("{\"a\":1"));
+    assertThatThrownBy(() -> Json.parse("{\"a\":1")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void truncatedObjectAfterKey_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("{\"a\""));
+    assertThatThrownBy(() -> Json.parse("{\"a\"")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void truncatedObjectAfterComma_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("{\"a\":1,"));
+    assertThatThrownBy(() -> Json.parse("{\"a\":1,")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void truncatedArray_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("[1,2"));
+    assertThatThrownBy(() -> Json.parse("[1,2")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void truncatedChatCompletionsBody_isIllegalArgument() {
     // The realistic shape: the VLM connection drops mid-body.
-    assertThrows(IllegalArgumentException.class,
-        () -> Json.parse("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"half"));
+    assertThatThrownBy(
+        () -> Json.parse("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"half"))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void emptyInput_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse(""));
+    assertThatThrownBy(() -> Json.parse("")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void whitespaceOnly_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("   \n\t "));
+    assertThatThrownBy(() -> Json.parse("   \n\t ")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void truncatedUnicodeEscape_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("\"\\u12\""));
+    assertThatThrownBy(() -> Json.parse("\"\\u12\"")).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void truncatedEscape_isIllegalArgument() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("\"abc\\"));
+    assertThatThrownBy(() -> Json.parse("\"abc\\")).isInstanceOf(IllegalArgumentException.class);
   }
 
   // -------------------------------------------------------------------------
@@ -76,13 +75,13 @@ class JsonAdversarialTest {
   @Test
   void deeplyNestedArray_isRejectedNotStackOverflow() {
     String deep = "[".repeat(200_000) + "]".repeat(200_000);
-    assertThrows(IllegalArgumentException.class, () -> Json.parse(deep));
+    assertThatThrownBy(() -> Json.parse(deep)).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void deeplyNestedUnclosedArray_isRejectedNotStackOverflow() {
     String deep = "[".repeat(200_000);
-    assertThrows(IllegalArgumentException.class, () -> Json.parse(deep));
+    assertThatThrownBy(() -> Json.parse(deep)).isInstanceOf(IllegalArgumentException.class);
   }
 
   // -------------------------------------------------------------------------
@@ -92,36 +91,36 @@ class JsonAdversarialTest {
   @Test
   void surrogatePairEscape_decodesToOneCodePoint() {
     Object parsed = Json.parse("{\"s\":\"\\uD83D\\uDE00\"}");
-    assertEquals("😀", Json.asString(Json.asObject(parsed).get("s")));
+    assertThat(Json.asString(Json.asObject(parsed).get("s"))).isEqualTo("😀");
   }
 
   @Test
   void nestedEscapes_roundTrip() {
     String original = "quote \" backslash \\ newline \n tab \t cr \r";
     Object parsed = Json.parse("{\"s\":" + Json.quote(original) + "}");
-    assertEquals(original, Json.asString(Json.asObject(parsed).get("s")));
+    assertThat(Json.asString(Json.asObject(parsed).get("s"))).isEqualTo(original);
   }
 
   @Test
   void unicodeRoundTrip_throughQuoteAndParse() {
     String original = "héllo wörld — emoji 😀 and CJK 漢字";
     Object parsed = Json.parse("{\"s\":" + Json.quote(original) + "}");
-    assertEquals(original, Json.asString(Json.asObject(parsed).get("s")));
+    assertThat(Json.asString(Json.asObject(parsed).get("s"))).isEqualTo(original);
   }
 
   @Test
   void controlCharacters_escapedByQuote() {
     String original = "\u0007bell\u000Cformfeed";
     String quoted = Json.quote(original);
-    assertTrue(quoted.contains("\\u0007"));
-    assertEquals(original, Json.asString(Json.parse(quoted)));
+    assertThat(quoted).contains("\\u0007");
+    assertThat(Json.asString(Json.parse(quoted))).isEqualTo(original);
   }
 
   @Test
   void veryLongString_parses() {
     String longText = "x".repeat(1_000_000) + "😀";
     Object parsed = Json.parse(Json.quote(longText));
-    assertEquals(longText, Json.asString(parsed));
+    assertThat(Json.asString(parsed)).isEqualTo(longText);
   }
 
   // -------------------------------------------------------------------------
@@ -130,41 +129,41 @@ class JsonAdversarialTest {
 
   @Test
   void bareNumberTokens_parse() {
-    assertEquals(List.of(1.0, -2.5, 1e3), Json.asArray(Json.parse("[1, -2.5, 1e3]")));
+    assertThat(Json.asArray(Json.parse("[1, -2.5, 1e3]"))).isEqualTo(List.of(1.0, -2.5, 1e3));
   }
 
   @Test
   void numberAsString_staysString() {
     Map<String, Object> parsed = Json.asObject(Json.parse("{\"n\":\"42\",\"m\":42}"));
-    assertEquals("42", parsed.get("n"));
-    assertEquals(42.0, parsed.get("m"));
+    assertThat(parsed.get("n")).isEqualTo("42");
+    assertThat(parsed.get("m")).isEqualTo(42.0);
   }
 
   @Test
   void nullValues_parse() {
     Map<String, Object> parsed = Json.asObject(Json.parse("{\"a\":null,\"b\":[null]}"));
-    assertNull(parsed.get("a"));
+    assertThat(parsed.get("a")).isNull();
     List<Object> array = Json.asArray(parsed.get("b"));
-    assertEquals(1, array.size());
-    assertNull(array.get(0));
+    assertThat(array.size()).isEqualTo(1);
+    assertThat(array.get(0)).isNull();
   }
 
   @Test
   void duplicateKeys_lastWins() {
-    assertEquals(2.0, Json.asObject(Json.parse("{\"a\":1,\"a\":2}")).get("a"));
+    assertThat(Json.asObject(Json.parse("{\"a\":1,\"a\":2}")).get("a")).isEqualTo(2.0);
   }
 
   @Test
   void arrayWhereObjectExpected_asObjectThrows() {
-    assertThrows(IllegalArgumentException.class,
-        () -> Json.asObject(Json.parse("[{\"choices\":[]}]")));
+    assertThatThrownBy(() -> Json.asObject(Json.parse("[{\"choices\":[]}]")))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void htmlishContent_roundTrips() {
     String html = "<p class=\"x\">a & b < c > d</p>";
     Object parsed = Json.parse("{\"s\":" + Json.quote(html) + "}");
-    assertEquals(html, Json.asString(Json.asObject(parsed).get("s")));
+    assertThat(Json.asString(Json.asObject(parsed).get("s"))).isEqualTo(html);
   }
 
   @Test
@@ -173,19 +172,20 @@ class JsonAdversarialTest {
     // parser keeps it; proto serialization later substitutes '?' for the
     // unpaired surrogate rather than throwing. Lenient end to end, no crash.
     String parsed = Json.asString(Json.parse("\"a\\ud800b\""));
-    assertEquals(3, parsed.length());
+    assertThat(parsed.length()).isEqualTo(3);
   }
 
   @Test
   void trailingGarbage_rejected() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("{} extra"));
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("{\"a\":1} {\"b\":2}"));
+    assertThatThrownBy(() -> Json.parse("{} extra")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> Json.parse("{\"a\":1} {\"b\":2}"))
+        .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void badLiteral_rejected() {
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("tru"));
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("nulL"));
-    assertThrows(IllegalArgumentException.class, () -> Json.parse("NaN"));
+    assertThatThrownBy(() -> Json.parse("tru")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> Json.parse("nulL")).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> Json.parse("NaN")).isInstanceOf(IllegalArgumentException.class);
   }
 }
