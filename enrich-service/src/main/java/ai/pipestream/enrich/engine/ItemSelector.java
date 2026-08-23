@@ -19,17 +19,16 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Walks a Document for enrichable items, mirroring Docling's enrichment flags:
- * pictures above an area threshold for description, chart-classified pictures
- * for chart extraction, and text items already labelled code or formula. This
- * service never re-runs layout: labels from gRParse are the authority.
+ * Walks a Document for enrichable items: pictures above an area threshold
+ * for description, chart-classified pictures for chart extraction, and text
+ * items already labelled code or formula. This service never re-runs layout:
+ * labels from gRParse are the authority.
  *
- * <p>Docling parity: the area threshold defaults to 0.05 of the page area,
- * prompts are the exact strings the SmolVLM / Granite Vision / chart2csv /
- * CodeFormula presets use, and a picture is a chart when its top
- * figure-class prediction is one of Docling's SUPPORTED_CHART_TYPES
- * (bar_chart, pie_chart, line_chart). One intentional excess over Docling:
- * a picture labelled DOC_ITEM_LABEL_CHART also triggers chart extraction.
+ * <p>Selection rules: the area threshold defaults to 0.05 of the page area,
+ * prompts are fixed per preset (SmolVLM / Granite Vision / chart2csv /
+ * CodeFormula), and a picture is a chart when its top figure-class
+ * prediction is one of the supported chart types (bar_chart, pie_chart,
+ * line_chart) or the picture carries the label DOC_ITEM_LABEL_CHART.
  */
 public final class ItemSelector {
 
@@ -61,22 +60,21 @@ public final class ItemSelector {
     }
   }
 
-  /** Docling's default picture_description_area_threshold (fraction of page). */
+  /** Default picture-description area threshold (fraction of the page area). */
   static final double DEFAULT_AREA_THRESHOLD = 0.05;
 
-  /** Docling's generation caps: description 200, code/formula 2048. Chart gets
-   * 4096 because a wide table does not fit in Docling's code/formula budget. */
+  /** Generation caps: description 200, code/formula 2048. Chart gets 4096
+   * because a wide table does not fit in the code/formula budget. */
   static final int MAX_TOKENS_DESCRIPTION = 200;
   static final int MAX_TOKENS_CODE_FORMULA = 2048;
   static final int MAX_TOKENS_CHART = 4096;
 
-  /** Docling's SUPPORTED_CHART_TYPES for chart extraction (top prediction,
-   * lowercased, exact match). */
+  /** Chart classes that trigger chart extraction (top prediction, lowercased,
+   * exact match). */
   private static final Set<String> SUPPORTED_CHART_TYPES =
       Set.of("bar_chart", "pie_chart", "line_chart");
 
-  // Prompts, verbatim from Docling (pipeline_options.py, granite_vision.py,
-  // code_formula_vlm_model.py).
+  // Fixed per-job prompts. Wire-visible model inputs; never reworded.
   private static final String DESCRIBE_PROMPT_SMOLVLM =
       "Describe this image in a few sentences.";
   private static final String DESCRIBE_PROMPT_GRANITE_VISION =
@@ -86,9 +84,8 @@ public final class ItemSelector {
   private static final String CODE_IMAGE_PROMPT = "<code>";
   private static final String FORMULA_IMAGE_PROMPT = "<formula>";
 
-  // Text-only fallbacks for code/formula items with no image crop: not a
-  // Docling mode (Docling always sends the crop), kept so enrichment still
-  // works when the caller cannot supply crops.
+  // Text-only fallbacks for code/formula items with no image crop, so
+  // enrichment still works when the caller cannot supply crops.
   private static final String CODE_TEXT_PROMPT =
       "Transcribe and normalize the following code block. Reply with the code only.\n\n";
   private static final String FORMULA_TEXT_PROMPT =
@@ -171,9 +168,9 @@ public final class ItemSelector {
     return declared.isEmpty() ? prefix + index : declared;
   }
 
-  /** A picture is a chart when its label says so (our addition over Docling)
-   * or its top figure-class prediction is one of Docling's supported chart
-   * types; there is no layout re-run here. */
+  /** A picture is a chart when its label says so or its top figure-class
+   * prediction is one of the supported chart types; there is no layout
+   * re-run here. */
   private static boolean isChart(PictureItem picture) {
     if (picture.getLabel() == ai.pipestream.document.v1.DocItemLabel.DOC_ITEM_LABEL_CHART) {
       return true;
@@ -195,7 +192,7 @@ public final class ItemSelector {
 
   /** Area ratio of the picture's first provenance box to its page. Pictures
    * without provenance or a known page size count as full-page (ratio 1).
-   * An unset (zero) or NaN threshold means Docling's default 0.05; a negative
+   * An unset (zero) or NaN threshold means the default 0.05; a negative
    * value disables the threshold entirely. */
   private static boolean passesArea(
       PictureItem picture, Document document, EnrichOptions options) {
@@ -268,8 +265,8 @@ public final class ItemSelector {
         .build();
   }
 
-  /** Docling's per-preset description prompt; the SmolVLM prompt is Docling's
-   * default for any other (raw) model. */
+  /** The per-preset description prompt; the SmolVLM prompt is the default
+   * for any other (raw) model. */
   private static String describePrompt(EnrichOptions options) {
     return switch (options.getPictureDescriptionPreset()) {
       case PICTURE_DESCRIPTION_PRESET_GRANITE_VISION -> DESCRIBE_PROMPT_GRANITE_VISION;

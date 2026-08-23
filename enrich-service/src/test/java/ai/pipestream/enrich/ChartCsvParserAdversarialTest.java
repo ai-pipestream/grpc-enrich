@@ -89,7 +89,7 @@ class ChartCsvParserAdversarialTest {
 
   @Test
   void firstRowAllEmptyStrings_isHeaderRow() throws Exception {
-    // Docling parity: header iff ALL first-row values are non-numeric; empty
+    // Header iff ALL first-row values are non-numeric; empty
     // strings are non-numeric, so this degenerate row is a header.
     TableData table = ChartCsvParser.parse(",\n1,2");
     assertTrue(table.getTableCells(0).getColumnHeader());

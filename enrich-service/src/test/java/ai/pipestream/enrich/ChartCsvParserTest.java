@@ -37,7 +37,7 @@ class ChartCsvParserTest {
 
   @Test
   void allNumericFirstRow_noHeaderRow() throws Exception {
-    // Docling: the first row is a header only when ALL its values are
+    // The first row is a header only when ALL its values are
     // non-numeric, so an all-numeric table has no header cells at all.
     TableData table = ChartCsvParser.parse("2023,10\n2024,12");
     assertEquals(2, table.getNumRows());
@@ -70,7 +70,7 @@ class ChartCsvParserTest {
 
   @Test
   void emptyCellIsNonNumericRowHeader() throws Exception {
-    // Docling treats NaN/empty as non-numeric: text "" and row_header=true.
+    // Empty cells count as non-numeric: text "" and row_header=true.
     TableData table = ChartCsvParser.parse("a,b\n,5");
     assertEquals("", table.getTableCells(2).getText());
     assertTrue(table.getTableCells(2).getRowHeader());

@@ -12,7 +12,7 @@ import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.Test;
 
 /**
- * Retry behavior of the HTTP client (Docling parity): transient 503/429/5xx
+ * Retry behavior of the HTTP client: transient 503/429/5xx
  * and connection drops retry with exponential backoff; other 4xx and read
  * timeouts do not. Backoff is shrunk to 1ms so no test sleeps noticeably.
  */
@@ -43,7 +43,7 @@ class OpenAiCompatVlmClientTest {
 
       assertThrows(VlmException.class,
           () -> client.complete("m", "describe", null, 200, Duration.ofSeconds(5)));
-      assertEquals(6, vlm.requests.size(), "1 initial attempt + 5 retries (Docling parity)");
+      assertEquals(6, vlm.requests.size(), "1 initial attempt + 5 retries");
     }
   }
 
@@ -83,7 +83,7 @@ class OpenAiCompatVlmClientTest {
 
       assertThrows(VlmException.class,
           () -> client.complete("m", "describe", null, 200, Duration.ofMillis(300)));
-      assertEquals(1, vlm.requests.size(), "a read timeout must not retry (Docling read=0)");
+      assertEquals(1, vlm.requests.size(), "a read timeout must not retry");
     }
   }
 }

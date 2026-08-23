@@ -63,9 +63,8 @@ message EnrichDocumentRequest {
   }
 }
 
-// What to enrich and how. Mirrors Docling's enrichment flags without the
-// Python unions: booleans plus enum presets, with *_raw fallbacks for model
-// names this schema does not know.
+// What to enrich and how: one boolean per job plus enum presets, with
+// *_raw fallbacks for model names this schema does not know.
 message EnrichOptions {
   // Annotate selected pictures with a VLM-generated description.
   bool do_picture_description = 1;
@@ -76,7 +75,7 @@ message EnrichOptions {
   string picture_description_preset_raw = 3;
   // Minimum picture area as a fraction of its page's area, below which the
   // picture is skipped for description (SKIP_REASON_BELOW_AREA_THRESHOLD).
-  // Zero (unset) or NaN applies Docling's default of 0.05; a negative value
+  // Zero (unset) or NaN applies the default of 0.05; a negative value
   // disables the threshold entirely. Pictures without provenance or a known
   // page size are treated as full-page and always pass.
   double picture_description_area_threshold = 4;
@@ -270,21 +269,19 @@ enum SkipReason {
   SKIP_REASON_VLM_ERROR = 4;
 }
 
-// Picture-description model families Docling names, served by the remote
-// endpoint. UNSPECIFIED plus picture_description_preset_raw addresses
+// Picture-description model families served by the remote endpoint. UNSPECIFIED plus picture_description_preset_raw addresses
 // whatever else the endpoint serves.
 enum PictureDescriptionPreset {
   // No enum preset; picture_description_preset_raw (or the endpoint default)
   // names the model.
   PICTURE_DESCRIPTION_PRESET_UNSPECIFIED = 0;
-  // SmolVLM family (Docling's smolvlm_picture_description).
+  // SmolVLM model family.
   PICTURE_DESCRIPTION_PRESET_SMOLVLM = 1;
-  // Granite Vision family (Docling's granite_picture_description).
+  // Granite Vision model family.
   PICTURE_DESCRIPTION_PRESET_GRANITE_VISION = 2;
 }
 
-// Chart-extraction model families Docling names, served by the remote
-// endpoint. UNSPECIFIED plus chart_preset_raw addresses whatever else the
+// Chart-extraction model families served by the remote endpoint. UNSPECIFIED plus chart_preset_raw addresses whatever else the
 // endpoint serves.
 enum ChartPreset {
   // No enum preset; chart_preset_raw (or the endpoint default) names the
@@ -294,14 +291,14 @@ enum ChartPreset {
   CHART_PRESET_GRANITE_VISION_CHART2CSV = 1;
 }
 
-// Code/formula model families Docling names, served by the remote endpoint.
+// Code/formula model families served by the remote endpoint.
 // UNSPECIFIED plus code_formula_preset_raw addresses whatever else the
 // endpoint serves.
 enum CodeFormulaPreset {
   // No enum preset; code_formula_preset_raw (or the endpoint default) names
   // the model.
   CODE_FORMULA_PRESET_UNSPECIFIED = 0;
-  // CodeFormula V2 (Docling's code/formula enrichment model).
+  // CodeFormula V2 code/formula enrichment model family.
   CODE_FORMULA_PRESET_CODE_FORMULA_V2 = 1;
 }
 

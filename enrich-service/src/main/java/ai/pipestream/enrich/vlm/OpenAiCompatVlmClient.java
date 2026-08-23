@@ -20,17 +20,15 @@ import java.util.Set;
  * {@code <endpoint>/v1/chat/completions} unless the endpoint already ends with
  * that path.
  *
- * <p>Retry behavior mirrors Docling's {@code api_image_request} (urllib3
- * {@code Retry(total=5, connect=5, read=0, backoff_factor=0.1,
- * status_forcelist=(429, 500, 502, 503, 504))}): up to 5 retries on those
- * statuses and on connection-level failures (a starting vLLM endpoint commonly
- * drops connections), with exponential backoff of 0.1s, 0.2s, 0.4s, 0.8s, 1.6s,
- * honoring a {@code Retry-After} header when present (clamped to the per-call
- * timeout, so a hostile or buggy endpoint cannot park a worker for days). Other 4xx, per-request
- * timeouts, and unparseable 200 bodies are not retried. The caller's timeout
- * still bounds each attempt (as it does in Docling, where the timeout is
- * per-request too); retries can add up to 5 extra attempts plus ~3.1s of
- * backoff on top of one timed-out attempt.
+ * <p>Retry behavior: up to 5 retries on HTTP 429/500/502/503/504 and on
+ * connection-level failures (a starting vLLM endpoint commonly drops
+ * connections), with exponential backoff of 0.1s, 0.2s, 0.4s, 0.8s, 1.6s,
+ * honoring a {@code Retry-After} header when present (clamped to the
+ * per-call timeout, so a hostile or buggy endpoint cannot park a worker for
+ * days). Other 4xx, per-request timeouts, and unparseable 200 bodies are not
+ * retried. The caller's timeout bounds each attempt individually; retries
+ * can add up to 5 extra attempts plus ~3.1s of backoff on top of one
+ * timed-out attempt.
  */
 public final class OpenAiCompatVlmClient implements VlmClient {
 
@@ -97,16 +95,15 @@ public final class OpenAiCompatVlmClient implements VlmClient {
   }
 
   /**
-   * Connection-level failures (refused, reset, connect timeout) are retryable,
-   * like Docling's {@code connect=5}; a per-request read timeout is not, like
-   * Docling's {@code read=0}.
+   * Connection-level failures (refused, reset, connect timeout) are
+   * retryable; a per-request read timeout is not.
    */
   private static boolean isRetryable(IOException failure) {
     return !(failure instanceof HttpTimeoutException)
         || failure instanceof HttpConnectTimeoutException;
   }
 
-  /** Docling parity: backoff_factor * 2^attempt → 0.1s, 0.2s, 0.4s, 0.8s, 1.6s. */
+  /** Exponential backoff: base * 2^attempt gives 0.1s, 0.2s, 0.4s, 0.8s, 1.6s. */
   private Duration backoff(int attempt) {
     return Duration.ofMillis(baseBackoff.toMillis() << attempt);
   }

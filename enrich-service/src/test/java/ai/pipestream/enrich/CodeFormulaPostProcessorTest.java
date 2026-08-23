@@ -7,7 +7,7 @@ import ai.pipestream.enrich.engine.CodeFormulaPostProcessor;
 import ai.pipestream.enrich.engine.CodeFormulaPostProcessor.CodeResult;
 import org.junit.jupiter.api.Test;
 
-/** Code/formula VLM output post-processing, mirroring Docling's CodeFormulaVlmModel. */
+/** Code/formula VLM output post-processing. */
 class CodeFormulaPostProcessorTest {
 
   @Test
@@ -58,8 +58,8 @@ class CodeFormulaPostProcessorTest {
   }
 
   @Test
-  void exactCaseMatchLikeDocling() {
-    // Docling matches CodeLanguageLabel(value) exactly: lowercase "python"
+  void exactCaseLanguageMatch() {
+    // Language matching is exact-case: lowercase "python"
     // is not the enum value "Python" and falls back to UNKNOWN.
     CodeResult result = CodeFormulaPostProcessor.processCode("<_python_>pass");
     assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_UNKNOWN, result.language());
@@ -76,7 +76,7 @@ class CodeFormulaPostProcessorTest {
 
   @Test
   void fullPipelineOrder() {
-    // Docling order: clean (truncate, strip, lstrip) first, then the
+    // Pipeline order: clean (truncate, strip, lstrip) first, then the
     // language token is read off the cleaned text.
     CodeResult result = CodeFormulaPostProcessor.processCode(
         "  <_C++_>int main() {}</code><end_of_utterance>tail");

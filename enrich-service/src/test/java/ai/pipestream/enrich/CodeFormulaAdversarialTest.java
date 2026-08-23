@@ -9,16 +9,16 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Adversarial code/formula post-processing: sentinel placement, language
- * tokens in odd positions, unicode. Several tests pin Docling-parity behavior
- * that looks surprising (sentinels stripped from legitimate code) — those are
+ * tokens in odd positions, unicode. Several tests pin behavior that looks
+ * surprising (sentinels stripped from legitimate code) — those are
  * deliberate, not bugs.
  */
 class CodeFormulaAdversarialTest {
 
   @Test
-  void sentinelInsideLegitimateCode_isStripped_doclingParity() {
-    // Docling's to_remove list applies unconditionally; code that literally
-    // prints the sentinel loses it. Surprising but parity — pinned as-is.
+  void sentinelInsideLegitimateCode_isStripped() {
+    // The sentinel list applies unconditionally; code that literally
+    // prints the sentinel loses it. Surprising but deliberate — pinned as-is.
     assertEquals("print(\"\")",
         CodeFormulaPostProcessor.clean("print(\"</code>\")"));
   }
@@ -52,7 +52,7 @@ class CodeFormulaAdversarialTest {
 
   @Test
   void languageTokenImmediatelyFollowedByCode() {
-    // Docling's regex allows zero whitespace between token and body.
+    // The token regex allows zero whitespace between token and body.
     CodeResult result = CodeFormulaPostProcessor.processCode("<_Python_>print(1)");
     assertEquals(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON, result.language());
     assertEquals("print(1)", result.text());
@@ -108,7 +108,7 @@ class CodeFormulaAdversarialTest {
 
   @Test
   void locSentinelVariant_notStrippedUnlessExact() {
-    // Only Docling's exact loc sentinel string is removed.
+    // Only the exact loc sentinel string is removed.
     assertEquals("<loc_1><loc_2><loc_3><loc_4>",
         CodeFormulaPostProcessor.clean("<loc_1><loc_2><loc_3><loc_4>"));
   }

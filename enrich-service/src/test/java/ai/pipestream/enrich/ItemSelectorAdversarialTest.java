@@ -156,7 +156,7 @@ class ItemSelectorAdversarialTest {
   @Test
   void nanThreshold_fallsBackToDefault() {
     // NaN is meaningless as a threshold; it must not silently skip every
-    // picture (NaN comparisons are all false). Treat it like unset: Docling's
+    // picture (NaN comparisons are all false). Treat it like unset: the
     // default 0.05 applies — a 4% picture is skipped, a 9% one described.
     Document small = documentOnPage(picture("#/pictures/0", 0, 0, 200, 200), 1000, 1000);
     Selection smallSelection = describeNaN(small);

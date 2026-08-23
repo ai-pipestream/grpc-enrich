@@ -16,8 +16,8 @@ public interface VlmClient {
    * @param prompt the instruction text
    * @param imageDataUri a {@code data:<mime>;base64,<bytes>} URI for vision
    *     calls, or null for text-only calls
-   * @param maxTokens generation cap (Docling parity: 200 for descriptions,
-   *     2048 for code/formula, 4096 for chart tables)
+   * @param maxTokens generation cap (200 for descriptions, 2048 for
+   *     code/formula, 4096 for chart tables)
    * @param timeout per-call timeout
    * @return the model's text response
    * @throws VlmException when the endpoint is unreachable, answers non-200,

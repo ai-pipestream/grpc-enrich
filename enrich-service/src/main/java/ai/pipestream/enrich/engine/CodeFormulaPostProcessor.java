@@ -7,8 +7,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Output post-processing for code/formula VLM responses, mirroring Docling's
- * CodeFormulaVlmModel: truncate at {@code <end_of_utterance>}, strip the
+ * Output post-processing for code/formula VLM responses:
+ * truncate at {@code <end_of_utterance>}, strip the
  * closing-tag and location sentinels, lstrip, then (code only) parse a
  * leading {@code <_language_>} token into a CodeLanguageLabel with an UNKNOWN
  * fallback. Applied to every code/formula response, whether the prompt was
@@ -19,17 +19,17 @@ public final class CodeFormulaPostProcessor {
   /** The result of post-processing a code response. */
   public record CodeResult(String text, CodeLanguageLabel language, String languageRaw) {}
 
-  /** Docling's {@code ^<_([^_>]+)_>\s*(.*)} language token. */
+  /** The leading {@code ^<_([^_>]+)_>\s*(.*)} language token. */
   private static final Pattern LANGUAGE_TOKEN =
       Pattern.compile("^<_([^_>]+)_>\\s*(.*)", Pattern.DOTALL);
 
-  /** Docling's to_remove list. */
+  /** Model-output sentinels stripped from every response. */
   private static final List<String> SENTINELS =
       List.of("</code>", "</formula>", "<loc_0><loc_0><loc_500><loc_500>");
 
-  /** Docling-core CodeLanguageLabel value strings to our proto enum. Matching
-   * is exact, as in Docling ({@code CodeLanguageLabel(value)}); anything else
-   * falls back to UNKNOWN with the raw string preserved. */
+  /** CodeLanguageLabel value strings (the document schema's spellings) to
+   * our proto enum. Matching is exact-case; anything else falls back to
+   * UNKNOWN with the raw string preserved. */
   private static final Map<String, CodeLanguageLabel> LANGUAGES = Map.ofEntries(
       Map.entry("Ada", CodeLanguageLabel.CODE_LANGUAGE_LABEL_ADA),
       Map.entry("Awk", CodeLanguageLabel.CODE_LANGUAGE_LABEL_AWK),
@@ -95,9 +95,9 @@ public final class CodeFormulaPostProcessor {
 
   private CodeFormulaPostProcessor() {}
 
-  /** Docling's _post_process.clean_text: truncate at the end-of-utterance
-   * marker (with or without the closing angle bracket), remove the
-   * closing-tag and location sentinels, then lstrip. */
+  /** Cleans a raw response: truncate at the end-of-utterance marker (with or
+   * without the closing angle bracket), remove the closing-tag and location
+   * sentinels, then lstrip. */
   public static String clean(String raw) {
     String text = raw;
     int idx = text.indexOf("<end_of_utterance>");

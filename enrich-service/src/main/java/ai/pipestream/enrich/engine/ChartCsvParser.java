@@ -12,10 +12,9 @@ import java.util.List;
  * The chart table is typed cells on the wire; the raw CSV only rides along in
  * the annotation for debugging.
  *
- * <p>Docling parity (granite_vision.py _dataframe_to_tabledata): the first
- * row is a column-header row only when ALL its values are non-numeric; any
- * non-numeric data cell is marked row_header=true; spans are 1x1 and no bbox
- * is set.
+ * <p>Typing rules: the first row is a column-header row only when ALL its
+ * values are non-numeric; any non-numeric data cell is marked
+ * row_header=true; spans are 1x1 and no bbox is set.
  */
 public final class ChartCsvParser {
 
@@ -69,8 +68,8 @@ public final class ChartCsvParser {
     return table.build();
   }
 
-  /** A value is numeric when it parses as a double (Docling uses pandas dtype
-   * inference; empty cells count as non-numeric, like pandas NaN). */
+  /** A value is numeric when it parses as a double; empty cells count as
+   * non-numeric. */
   private static boolean isNumeric(String value) {
     String trimmed = value.trim();
     if (trimmed.isEmpty()) {

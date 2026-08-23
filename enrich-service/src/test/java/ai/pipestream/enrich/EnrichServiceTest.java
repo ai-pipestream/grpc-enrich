@@ -467,7 +467,7 @@ class EnrichServiceTest {
       assertEquals(2, result.events().get(result.events().size() - 1)
           .getComplete().getSucceeded());
       // Text-only enrichment sends no image, keeps the existing text in the
-      // prompt, and uses Docling's code/formula generation budget.
+      // prompt, and uses the code/formula generation budget.
       assertEquals(2, vlm.requests.size());
       for (var request : vlm.requests) {
         assertFalse(request.hasImage());
@@ -508,7 +508,7 @@ class EnrichServiceTest {
               .build()));
 
       assertNull(result.error(), "RPC must be OK: " + result.error());
-      // Docling sends the image crop with the bare prompt "<code>".
+      // An image crop rides with the bare prompt "<code>".
       assertEquals(1, vlm.requests.size());
       assertTrue(vlm.requests.get(0).hasImage());
       assertEquals("<code>", vlm.requests.get(0).prompt());
@@ -639,11 +639,11 @@ class EnrichServiceTest {
   }
 
   @Test
-  void defaultAreaThreshold_docling005() throws Exception {
+  void defaultAreaThreshold_fivePercent() throws Exception {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
       vlm.responder = body -> "big enough";
       EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
-      // 200x200 on a 1000x1000 page = 4% < Docling's default 0.05: skipped
+      // 200x200 on a 1000x1000 page = 4% < the default 0.05: skipped
       // even though no threshold was set explicitly.
       EnrichOptions small = EnrichOptions.newBuilder()
           .setDoPictureDescription(true)
@@ -701,7 +701,7 @@ class EnrichServiceTest {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
       vlm.responder = body -> "year,sales\n2023,10";
       EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
-      // Label is PICTURE; the top classification prediction is a Docling
+      // Label is PICTURE; the top classification prediction is a
       // supported chart type, so chart extraction runs.
       Document document = Document.newBuilder().setName("test")
           .addPictures(classifiedPicture("#/pictures/0", "bar_chart"))
@@ -718,7 +718,7 @@ class EnrichServiceTest {
       assertEquals(1, annotations(result).size());
       assertTrue(annotations(result).get(0).hasChartTable());
       assertEquals(1, vlm.requests.size());
-      // Docling's exact chart prompt and the chart generation budget.
+      // The pinned chart prompt and the chart generation budget.
       assertEquals("Convert the information in this chart into a data table in CSV format.",
           vlm.requests.get(0).prompt());
       assertEquals(4096, vlm.requests.get(0).maxTokens());
@@ -730,8 +730,8 @@ class EnrichServiceTest {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
       vlm.responder = body -> "a scatter plot";
       EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
-      // "scatter_chart" contains "chart" but is not in Docling's
-      // SUPPORTED_CHART_TYPES: no chart job, description runs instead.
+      // "scatter_chart" contains "chart" but is not a supported chart
+      // type: no chart job, description runs instead.
       Document document = Document.newBuilder().setName("test")
           .addPictures(classifiedPicture("#/pictures/0", "scatter_chart"))
           .build();
@@ -751,7 +751,7 @@ class EnrichServiceTest {
   }
 
   @Test
-  void presetPrompts_matchDocling() throws Exception {
+  void presetPrompts_arePinned() throws Exception {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
       vlm.responder = body -> "caption";
       EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
