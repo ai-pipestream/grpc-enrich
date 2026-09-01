@@ -1,6 +1,6 @@
 [versions]
 grpc = "1.83.1"
-protobuf = "4.35.1"
+protobuf = "4.36.1"
 log4j = "2.26.1"
 junit = "5.14.4"
 protobufPlugin = "0.10.0"
