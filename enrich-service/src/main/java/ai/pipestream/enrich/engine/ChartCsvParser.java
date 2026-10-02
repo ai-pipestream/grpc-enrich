@@ -6,6 +6,8 @@ import ai.pipestream.document.v1.TableRow;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Turns the CSV a chart2csv-style VLM returns into typed TableData cells.
@@ -18,7 +20,31 @@ import java.util.List;
  */
 public final class ChartCsvParser {
 
+  // Docling's _extract_csv_to_dataframe: the body of a fenced csv block when
+  // there is one; otherwise the reply with any leading ```/```csv fence and
+  // trailing ``` fence removed.
+  private static final Pattern CSV_FENCE =
+      Pattern.compile("```csv\\s*\\n(.*?)\\n```", Pattern.DOTALL);
+  private static final Pattern LEADING_FENCE = Pattern.compile("^`{3,}(?:csv)?\\s*");
+  private static final Pattern TRAILING_FENCE = Pattern.compile("`{3,}\\s*$");
+
   private ChartCsvParser() {}
+
+  /**
+   * The CSV inside a chart2csv reply, the way Docling reads it: the first
+   * fenced {@code ```csv} block's body (stripped) when there is one,
+   * otherwise the whole reply stripped of a leading {@code ```} or
+   * {@code ```csv} fence and a trailing {@code ```} fence. A bare CSV reply
+   * comes back unchanged apart from surrounding whitespace.
+   */
+  public static String extractCsv(String reply) {
+    Matcher fenced = CSV_FENCE.matcher(reply);
+    if (fenced.find()) {
+      return fenced.group(1).strip();
+    }
+    String csv = LEADING_FENCE.matcher(reply.strip()).replaceFirst("");
+    return TRAILING_FENCE.matcher(csv).replaceFirst("").strip();
+  }
 
   /**
    * Parses CSV text (RFC 4180-ish: quoted fields, embedded commas and quotes)

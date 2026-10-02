@@ -2,6 +2,9 @@ package ai.pipestream.enrich.engine;
 
 import ai.pipestream.document.v1.BaseTextItem;
 import ai.pipestream.document.v1.CodeItem;
+import ai.pipestream.document.v1.CodeLanguageLabel;
+import ai.pipestream.document.v1.CodeMetaField;
+import ai.pipestream.document.v1.DescriptionMetaField;
 import ai.pipestream.document.v1.DescriptionAnnotation;
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.document.v1.PictureAnnotation;
@@ -21,6 +24,9 @@ import ai.pipestream.enrich.v1.SkipReason;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
@@ -106,17 +112,27 @@ public final class EnrichmentEngine {
         ? defaultTimeout
         : Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
 
-    if (!selection.work().isEmpty() && endpoint.isEmpty()) {
-      for (WorkItem item : selection.work()) {
+    // A work item may name its own endpoint (chart calls routed to a chart
+    // model); every other item uses the request's. One client per endpoint.
+    List<WorkItem> runnable = new ArrayList<>();
+    for (WorkItem item : selection.work()) {
+      if (endpointFor(item, endpoint).isEmpty()) {
         skipped.incrementAndGet();
-        emit.accept(skippedEvent(item.selfRef(), SkipReason.SKIP_REASON_VLM_ERROR,
+        emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR,
             "no VLM endpoint configured (set ENRICH_VLM_URL or EnrichOptions.vlm_endpoint)"));
+      } else {
+        runnable.add(item);
       }
-    } else {
-      VlmClient client = clientFactory.create(endpoint);
+    }
+    if (!runnable.isEmpty()) {
+      Map<String, VlmClient> clients = new HashMap<>();
+      for (WorkItem item : runnable) {
+        clients.computeIfAbsent(endpointFor(item, endpoint), clientFactory::create);
+      }
       Semaphore slots = new Semaphore(Math.max(1, concurrency));
-      CountDownLatch done = new CountDownLatch(selection.work().size());
-      for (WorkItem item : selection.work()) {
+      CountDownLatch done = new CountDownLatch(runnable.size());
+      for (WorkItem item : runnable) {
+        VlmClient client = clients.get(endpointFor(item, endpoint));
         executor.execute(() -> {
           try {
             slots.acquire();
@@ -150,6 +166,10 @@ public final class EnrichmentEngine {
     emit.accept(event(complete.build()));
   }
 
+  private static String endpointFor(WorkItem item, String requestEndpoint) {
+    return item.endpoint() == null ? requestEndpoint : item.endpoint();
+  }
+
   /** A work item paired with the annotation its own VLM call produced. The
    * pairing (not the self_ref) keys patch application, so two items sharing
    * a self_ref still each get their own annotation. */
@@ -173,9 +193,7 @@ public final class EnrichmentEngine {
           .setModel(item.model());
       switch (item.kind()) {
         case DESCRIPTION -> annotation.getDescriptionBuilder().setText(content);
-        case CHART -> annotation.getChartTableBuilder()
-            .setTable(ChartCsvParser.parse(content))
-            .setCsv(content);
+        case CHART -> chartAnnotation(item, content, annotation);
         case CODE -> {
           CodeFormulaPostProcessor.CodeResult code =
               CodeFormulaPostProcessor.processCode(content);
@@ -193,12 +211,44 @@ public final class EnrichmentEngine {
       emit.accept(EnrichDocumentResponse.newBuilder().setAnnotation(built).build());
     } catch (VlmException vlm) {
       skipped.incrementAndGet();
-      emit.accept(skippedEvent(item.selfRef(), SkipReason.SKIP_REASON_VLM_ERROR,
-          vlm.getMessage()));
+      emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR, vlm.getMessage()));
     } catch (RuntimeException unexpected) {
       failed.incrementAndGet();
-      emit.accept(skippedEvent(item.selfRef(), SkipReason.SKIP_REASON_UNSPECIFIED,
+      emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_UNSPECIFIED,
           "unexpected failure enriching this item: " + unexpected));
+    }
+  }
+
+  /** Post-processes one chart output's reply the way Docling's
+   * granite_vision_charts handler does: csv into typed cells (from a fenced
+   * csv block when there is one), summary verbatim, code from the first
+   * fenced python block. A reply that yields nothing usable is a
+   * VlmException, so the output is skipped and the chart's other outputs
+   * still land. */
+  private static void chartAnnotation(
+      WorkItem item, String content, ItemAnnotation.Builder annotation) throws VlmException {
+    switch (item.chartOutput()) {
+      case CHART_OUTPUT_SUMMARY -> {
+        if (content.isBlank()) {
+          throw new VlmException("chart model returned an empty summary");
+        }
+        annotation.getChartSummaryBuilder().setText(content);
+      }
+      case CHART_OUTPUT_CODE -> {
+        String code = ChartCodeExtractor.extractPython(content);
+        if (code == null || code.isEmpty()) {
+          throw new VlmException("chart model reply carries no fenced python code block");
+        }
+        annotation.getChartCodeBuilder()
+            .setText(code)
+            .setLanguage(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON);
+      }
+      default -> {
+        String csv = ChartCsvParser.extractCsv(content);
+        annotation.getChartTableBuilder()
+            .setTable(ChartCsvParser.parse(csv))
+            .setCsv(csv);
+      }
     }
   }
 
@@ -225,13 +275,37 @@ public final class EnrichmentEngine {
         }
         case CHART -> {
           PictureItem picture = patched.getPictures(item.pictureIndex());
-          patched.setPictures(item.pictureIndex(), picture.toBuilder()
-              .addAnnotations(PictureAnnotation.newBuilder()
-                  .setTabularChart(PictureTabularChartData.newBuilder()
-                      .setKind("tabular_chart")
-                      .setTitle(annotation.getChartTable().getTitle())
-                      .setChartData(annotation.getChartTable().getTable())))
-              .build());
+          PictureItem.Builder updated = picture.toBuilder();
+          switch (annotation.getAnnotationCase()) {
+            case CHART_SUMMARY -> {
+              updated.addAnnotations(PictureAnnotation.newBuilder()
+                  .setDescription(DescriptionAnnotation.newBuilder()
+                      .setKind("description")
+                      .setText(annotation.getChartSummary().getText())
+                      .setProvenance(annotation.getModel())));
+              DescriptionMetaField.Builder description = updated.getMetaBuilder()
+                  .getDescriptionBuilder()
+                  .setText(annotation.getChartSummary().getText());
+              if (!annotation.getModel().isEmpty()) {
+                description.setCreatedBy(annotation.getModel());
+              }
+            }
+            case CHART_CODE -> {
+              CodeMetaField.Builder code = updated.getMetaBuilder()
+                  .getCodeBuilder()
+                  .setText(annotation.getChartCode().getText())
+                  .setLanguage(annotation.getChartCode().getLanguage());
+              if (!annotation.getModel().isEmpty()) {
+                code.setCreatedBy(annotation.getModel());
+              }
+            }
+            default -> updated.addAnnotations(PictureAnnotation.newBuilder()
+                .setTabularChart(PictureTabularChartData.newBuilder()
+                    .setKind("tabular_chart")
+                    .setTitle(annotation.getChartTable().getTitle())
+                    .setChartData(annotation.getChartTable().getTable())));
+          }
+          patched.setPictures(item.pictureIndex(), updated.build());
         }
         case CODE -> {
           BaseTextItem text = patched.getTexts(item.textIndex());
@@ -265,12 +339,13 @@ public final class EnrichmentEngine {
   }
 
   private static EnrichDocumentResponse skippedEvent(
-      String selfRef, SkipReason reason, String detail) {
+      WorkItem item, SkipReason reason, String detail) {
     return EnrichDocumentResponse.newBuilder()
         .setSkipped(ItemSkipped.newBuilder()
-            .setSelfRef(selfRef)
+            .setSelfRef(item.selfRef())
             .setReason(reason)
-            .setDetail(detail == null ? "" : detail))
+            .setDetail(detail == null ? "" : detail)
+            .setChartOutput(item.chartOutput()))
         .build();
   }
 }

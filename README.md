@@ -143,9 +143,28 @@ does not re-run layout.
 
 Prompts are fixed per job. Picture description: `Describe this image in a few
 sentences.` (SmolVLM preset) or `What is shown in this image?` (Granite
-Vision preset). Chart: `Convert the information in this chart into a data
-table in CSV format.` Code and formula with an image crop: the bare `<code>`
-/ `<formula>`.
+Vision preset). Chart, without `EnrichOptions.chart_extraction`: one call
+per chart, `Convert the information in this chart into a data table in CSV
+format.` Code and formula with an image crop: the bare `<code>` /
+`<formula>`.
+
+Chart outputs (`EnrichOptions.chart_extraction`, the Docling chart stage).
+Three independent outputs, each its own VLM call per chart and its own event:
+`csv` (default on) becomes a `ChartTable`, `summary` a `ChartSummary`, `code`
+a `ChartCode` (Python). The prompts are the Granite Vision special tokens
+`<chart2csv>`, `<chart2summary>`, `<chart2code>`, or with
+`natural_language_prompts` Docling's natural-language equivalents, verbatim.
+Post-processing follows Docling: the CSV is the body of the first fenced
+`csv` block when there is one (otherwise the reply with stray fences
+stripped); the summary is the reply verbatim; the code is the body of the
+first fenced `python` block. A reply that yields nothing usable (a blank
+summary, no python fence, unparseable CSV) skips that output only, as an
+`ItemSkipped` whose `chart_output` names it; the chart's other outputs still
+land. `chart_extraction.model` and `chart_extraction.vlm_endpoint` route the
+chart calls to their own model and endpoint without touching the other jobs.
+All three outputs switched off is `INVALID_ARGUMENT`. With `return_document`,
+the summary lands in the picture's `meta.description` and the code in
+`meta.code`, both with `created_by` naming the model.
 
 Code and formula items are sent as image crops when an `ItemImage` is
 supplied for the item's `self_ref` (code items may also carry an inline
@@ -163,7 +182,7 @@ only when all its values are non-numeric; any non-numeric data cell is marked
 `row_header=true` (an empty cell counts as non-numeric).
 
 Generation budgets (`max_tokens`): description 200, code/formula 2048, chart
-4096 (a wide table does not fit in 2048).
+4096 for every chart output (a wide table does not fit in 2048).
 
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
 retried up to 5 times with exponential backoff starting at 0.1s, then the

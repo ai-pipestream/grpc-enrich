@@ -40,15 +40,20 @@ image bytes from the document and sends crops separately.
 fallback for model names the schema does not know,
 `picture_description_area_threshold`, and the per-request overrides
 `vlm_endpoint`, `concurrency`, `timeout_seconds`. `return_document` asks for
-the patched full document in the trailer.
+the patched full document in the trailer. `chart_extraction`
+(`ChartExtractionOptions`) turns on the Docling chart stage: `csv`,
+`summary`, `code` output switches, `natural_language_prompts`, and a
+chart-only `model` and `vlm_endpoint`.
 
 Events:
 
 1. `EnrichStarted`: item counts selected
 2. `ItemAnnotation`: `self_ref` plus one of `description` (string, model,
-   confidence), `chart_table` (a `TableData`), or `code` / `formula` (text +
-   language)
-3. `ItemSkipped`: ref + reason (no image, below threshold, VLM error)
+   confidence), `chart_table` (a `TableData`), `chart_summary` (text),
+   `chart_code` (Python text), or `code` / `formula` (text + language). A
+   chart with several outputs enabled is answered by one event per output.
+3. `ItemSkipped`: ref + reason (no image, below threshold, VLM error), plus
+   `chart_output` naming the chart output a skip is about
 4. `EnrichComplete`: succeeded / skipped / failed counts
 
 The client (gRParse or a sidecar) applies patches. This server may also
