@@ -11,6 +11,7 @@ import java.net.http.HttpTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -84,20 +85,12 @@ public final class OpenAiCompatVlmClient implements VlmClient {
   }
 
   @Override
-  public String complete(String model, String prompt, String imageDataUri, int maxTokens,
-      Duration timeout)
-      throws VlmException {
-    HttpRequest request =
-        HttpRequest.newBuilder(completionsUri)
-            .timeout(timeout)
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(
-                requestBody(model, prompt, imageDataUri, maxTokens)))
-            .build();
+  public String complete(VlmRequest call) throws VlmException {
+    HttpRequest request = buildRequest(call);
     for (int attempt = 0; ; attempt++) {
       final HttpResponse<byte[]> response;
       try {
-        response = send(request, timeout);
+        response = send(request, call.timeout());
       } catch (IOException failure) {
         if (attempt < MAX_RETRIES && isRetryable(failure)) {
           sleep(backoff(attempt));
@@ -108,7 +101,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       String body = new String(response.body(), StandardCharsets.UTF_8);
       if (response.statusCode() != 200) {
         if (attempt < MAX_RETRIES && RETRYABLE_STATUSES.contains(response.statusCode())) {
-          sleep(retryWait(response, attempt, timeout));
+          sleep(retryWait(response, attempt, call.timeout()));
           continue;
         }
         throw new VlmException(
@@ -116,6 +109,26 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       }
       return extractContent(body);
     }
+  }
+
+  /**
+   * The request for one call. A header the JDK refuses is reported by name
+   * only: its value is usually a credential, and the JDK's own message
+   * repeats it.
+   */
+  private HttpRequest buildRequest(VlmRequest call) throws VlmException {
+    HttpRequest.Builder builder = HttpRequest.newBuilder(completionsUri)
+        .timeout(call.timeout())
+        .header("Content-Type", "application/json")
+        .POST(requestBody(call));
+    for (Header header : call.headers()) {
+      try {
+        builder.header(header.name(), header.value());
+      } catch (IllegalArgumentException refused) {
+        throw new VlmException("request header " + header.name() + " is not a valid HTTP header");
+      }
+    }
+    return builder.build();
   }
 
   /**
@@ -207,22 +220,51 @@ public final class OpenAiCompatVlmClient implements VlmClient {
     }
   }
 
-  private static String requestBody(String model, String prompt, String imageDataUri,
-      int maxTokens) {
-    StringBuilder body = new StringBuilder(256 + prompt.length());
-    body.append('{');
-    if (model != null && !model.isEmpty()) {
-      body.append("\"model\":").append(Json.quote(model)).append(',');
+  /**
+   * The chat-completions body. A crop is base64-encoded here, for this call
+   * only, and sent as its own buffer between the JSON around it, so no
+   * second copy of the encoded image is built.
+   */
+  private static HttpRequest.BodyPublisher requestBody(VlmRequest call) {
+    String prompt = call.prompt();
+    StringBuilder head = new StringBuilder(256 + prompt.length());
+    head.append('{');
+    if (call.model() != null && !call.model().isEmpty()) {
+      head.append("\"model\":").append(Json.quote(call.model())).append(',');
     }
-    body.append("\"messages\":[{\"role\":\"user\",\"content\":[");
-    body.append("{\"type\":\"text\",\"text\":").append(Json.quote(prompt)).append('}');
-    if (imageDataUri != null) {
-      body.append(",{\"type\":\"image_url\",\"image_url\":{\"url\":")
-          .append(Json.quote(imageDataUri))
+    head.append("\"messages\":[{\"role\":\"user\",\"content\":[");
+    head.append("{\"type\":\"text\",\"text\":").append(Json.quote(prompt)).append('}');
+    byte[] base64 = null;
+    switch (call.image()) {
+      case null -> { }
+      case VlmImage.DataUri inline -> head
+          .append(",{\"type\":\"image_url\",\"image_url\":{\"url\":")
+          .append(Json.quote(inline.uri()))
           .append("}}");
+      case VlmImage.Bytes crop -> {
+        String mime = crop.mimetype().isEmpty() ? "image/png" : crop.mimetype();
+        String prefix = Json.quote("data:" + mime + ";base64,");
+        head.append(",{\"type\":\"image_url\",\"image_url\":{\"url\":")
+            .append(prefix, 0, prefix.length() - 1);
+        base64 = Base64.getEncoder().encode(crop.data().toByteArray());
+      }
     }
-    body.append("]}],\"max_tokens\":").append(maxTokens).append('}');
-    return body.toString();
+    StringBuilder tail = new StringBuilder(96);
+    if (base64 != null) {
+      tail.append("\"}}");
+    }
+    tail.append("]}],\"max_tokens\":").append(call.maxTokens());
+    call.temperature().ifPresent(value -> tail.append(",\"temperature\":").append(value));
+    call.topP().ifPresent(value -> tail.append(",\"top_p\":").append(value));
+    call.seed().ifPresent(value -> tail.append(",\"seed\":").append(value));
+    tail.append('}');
+    if (base64 == null) {
+      return HttpRequest.BodyPublishers.ofString(head.append(tail).toString());
+    }
+    return HttpRequest.BodyPublishers.concat(
+        HttpRequest.BodyPublishers.ofByteArray(head.toString().getBytes(StandardCharsets.UTF_8)),
+        HttpRequest.BodyPublishers.ofByteArray(base64),
+        HttpRequest.BodyPublishers.ofByteArray(tail.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
   /** Reads choices[0].message.content out of the chat-completions reply. */

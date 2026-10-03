@@ -23,11 +23,14 @@ import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.SkipReason;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmRequest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -185,9 +188,9 @@ public final class EnrichmentEngine {
       AtomicInteger failed,
       ConcurrentLinkedQueue<EnrichedItem> enriched) {
     try {
-      String content =
-          client.complete(item.model(), item.prompt(), item.imageDataUri(), item.maxTokens(),
-              timeout);
+      String content = client.complete(new VlmRequest(item.model(), item.prompt(), item.image(),
+          item.maxTokens(), OptionalDouble.empty(), OptionalDouble.empty(), OptionalLong.empty(),
+          List.of(), timeout));
       ItemAnnotation.Builder annotation = ItemAnnotation.newBuilder()
           .setSelfRef(item.selfRef())
           .setModel(item.model());

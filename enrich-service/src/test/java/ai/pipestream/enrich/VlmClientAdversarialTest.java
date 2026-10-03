@@ -5,8 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
+import ai.pipestream.enrich.vlm.Json;
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
+import ai.pipestream.enrich.vlm.VlmClient.Header;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmImage;
+import ai.pipestream.enrich.vlm.VlmClient.VlmRequest;
+import com.google.protobuf.ByteString;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -14,7 +19,11 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -31,6 +40,7 @@ class VlmClientAdversarialTest {
     final HttpServer server;
     final List<String> paths = new ArrayList<>();
     final List<String> queries = new ArrayList<>();
+    final List<String> requestBodies = new ArrayList<>();
     final AtomicInteger calls = new AtomicInteger();
     volatile int status = 200;
     volatile String body = "";
@@ -44,9 +54,12 @@ class VlmClientAdversarialTest {
       server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
       server.createContext("/", exchange -> {
         calls.incrementAndGet();
+        String request = new String(exchange.getRequestBody().readAllBytes(),
+            StandardCharsets.UTF_8);
         synchronized (paths) {
           paths.add(exchange.getRequestURI().getPath());
           queries.add(exchange.getRequestURI().getRawQuery());
+          requestBodies.add(request);
         }
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         if (retryAfter != null) {
@@ -329,6 +342,49 @@ class VlmClientAdversarialTest {
           .isInstanceOf(VlmException.class);
       assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(4));
       assertThat(vlm.calls.get()).as("a timeout is not retried").isEqualTo(1);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Request shape: lazy crops, typed params, headers
+  // -------------------------------------------------------------------------
+
+  private static VlmRequest request(VlmImage image, List<Header> headers) {
+    return new VlmRequest("m", "describe", image, 77, OptionalDouble.of(0.5),
+        OptionalDouble.of(0.25), OptionalLong.of(-3), headers, Duration.ofSeconds(5));
+  }
+
+  @Test
+  void cropBytes_areSentAsAnExactDataUri() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      vlm.body = chatBody("\"ok\"");
+      byte[] png = new byte[3001];
+      for (int i = 0; i < png.length; i++) {
+        png[i] = (byte) (i * 31);
+      }
+      OpenAiCompatVlmClient client = new OpenAiCompatVlmClient(vlm.url(), Duration.ofMillis(1));
+      client.complete(request(new VlmImage.Bytes("image/x-test\"\\", ByteString.copyFrom(png)),
+          List.of()));
+
+      Map<String, Object> sent = Json.asObject(Json.parse(vlm.requestBodies.get(0)));
+      Map<String, Object> message = Json.asObject(Json.asArray(sent.get("messages")).get(0));
+      Map<String, Object> imagePart = Json.asObject(Json.asArray(message.get("content")).get(1));
+      String url = Json.asString(Json.asObject(imagePart.get("image_url")).get("url"));
+      assertThat(url).isEqualTo("data:image/x-test\"\\;base64,"
+          + Base64.getEncoder().encodeToString(png));
+      assertThat(sent).containsEntry("max_tokens", 77.0).containsEntry("temperature", 0.5)
+          .containsEntry("top_p", 0.25).containsEntry("seed", -3.0);
+    }
+  }
+
+  @Test
+  void headerTheJdkRefuses_isReportedByNameOnly() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      OpenAiCompatVlmClient client = new OpenAiCompatVlmClient(vlm.url(), Duration.ofMillis(1));
+      VlmException error = catchThrowableOfType(VlmException.class, () -> client.complete(
+          request(null, List.of(new Header("X-Token", "secret-value\r\nX-Evil: 1")))));
+      assertThat(error.getMessage()).contains("X-Token").doesNotContain("secret-value");
+      assertThat(vlm.calls.get()).isZero();
     }
   }
 

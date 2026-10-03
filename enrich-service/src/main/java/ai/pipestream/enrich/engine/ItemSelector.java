@@ -16,8 +16,8 @@ import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.SkipReason;
+import ai.pipestream.enrich.vlm.VlmClient.VlmImage;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -48,13 +48,15 @@ public final class ItemSelector {
   /** One item selected for a VLM call. A chart picture yields one work item
    * per enabled chart output, each with its own prompt; {@code chartOutput}
    * names which (UNSPECIFIED for every other kind). {@code endpoint} is the
-   * per-item endpoint override, or null for the request's endpoint. */
+   * per-item endpoint override, or null for the request's endpoint.
+   * {@code image} is null for a text-only call; a crop stays raw bytes here
+   * and is encoded only when its own call is made. */
   public record WorkItem(
       String selfRef,
       Kind kind,
       String model,
       String prompt,
-      String imageDataUri,
+      VlmImage image,
       String text,
       int maxTokens,
       int pictureIndex,
@@ -62,9 +64,9 @@ public final class ItemSelector {
       ChartOutput chartOutput,
       String endpoint) {
 
-    WorkItem(String selfRef, Kind kind, String model, String prompt, String imageDataUri,
+    WorkItem(String selfRef, Kind kind, String model, String prompt, VlmImage image,
         String text, int maxTokens, int pictureIndex, int textIndex) {
-      this(selfRef, kind, model, prompt, imageDataUri, text, maxTokens, pictureIndex, textIndex,
+      this(selfRef, kind, model, prompt, image, text, maxTokens, pictureIndex, textIndex,
           ChartOutput.CHART_OUTPUT_UNSPECIFIED, null);
     }
   }
@@ -158,7 +160,7 @@ public final class ItemSelector {
         }
         continue;
       }
-      String image = imageDataUri(picture.getImage(), selfRef, crops);
+      VlmImage image = image(picture.getImage(), selfRef, crops);
       if (image == null) {
         skips.add(imageSkip(picture, selfRef));
         continue;
@@ -176,8 +178,8 @@ public final class ItemSelector {
       if (options.getDoCodeEnrichment() && baseText.hasCode()) {
         CodeItem code = baseText.getCode();
         String selfRef = selfRef(code.getSelfRef(), "#/texts/", i);
-        String image = code.hasImage() ? imageDataUri(code.getImage(), selfRef, crops)
-            : cropDataUri(selfRef, crops);
+        VlmImage image = code.hasImage() ? image(code.getImage(), selfRef, crops)
+            : crop(selfRef, crops);
         if (image != null) {
           work.add(new WorkItem(selfRef, Kind.CODE, codeFormulaModel(options), CODE_IMAGE_PROMPT,
               image, code.getText(), MAX_TOKENS_CODE_FORMULA, -1, i));
@@ -189,7 +191,7 @@ public final class ItemSelector {
       } else if (options.getDoFormulaEnrichment() && baseText.hasFormula()) {
         FormulaItem formula = baseText.getFormula();
         String selfRef = selfRef(formula.getBase().getSelfRef(), "#/texts/", i);
-        String image = cropDataUri(selfRef, crops);
+        VlmImage image = crop(selfRef, crops);
         if (image != null) {
           work.add(new WorkItem(selfRef, Kind.FORMULA, codeFormulaModel(options),
               FORMULA_IMAGE_PROMPT, image, formula.getBase().getText(), MAX_TOKENS_CODE_FORMULA,
@@ -209,7 +211,7 @@ public final class ItemSelector {
    * summary, code). Without ChartExtractionOptions: the original single CSV
    * call with its original prompt. */
   private static void addChartWork(
-      List<WorkItem> work, String selfRef, String image, int pictureIndex,
+      List<WorkItem> work, String selfRef, VlmImage image, int pictureIndex,
       EnrichOptions options) {
     if (!options.hasChartExtraction()) {
       work.add(new WorkItem(selfRef, Kind.CHART, chartModel(options), CHART_PROMPT, image,
@@ -312,27 +314,27 @@ public final class ItemSelector {
 
   /** Resolves image bytes for an item: an ItemImage crop wins, then an inline
    * data URI on the item's ImageRef. Anything else is null (skipped). */
-  private static String imageDataUri(
+  private static VlmImage image(
       ImageRef imageRef, String selfRef, Map<String, ItemImage> crops) {
-    String crop = cropDataUri(selfRef, crops);
+    VlmImage crop = crop(selfRef, crops);
     if (crop != null) {
       return crop;
     }
     if (imageRef != null && imageRef.getUri().startsWith("data:")) {
-      return imageRef.getUri();
+      return new VlmImage.DataUri(imageRef.getUri());
     }
     return null;
   }
 
-  /** The ItemImage crop for a self_ref as a data URI, or null when absent. */
-  private static String cropDataUri(String selfRef, Map<String, ItemImage> crops) {
+  /** The ItemImage crop for a self_ref, or null when absent. The bytes are
+   * referenced, not copied or encoded: base64 happens per call, so a large
+   * document's crops are never all held encoded at once. */
+  private static VlmImage crop(String selfRef, Map<String, ItemImage> crops) {
     ItemImage crop = crops.get(selfRef);
     if (crop == null) {
       return null;
     }
-    String mime = crop.getMimetype().isEmpty() ? "image/png" : crop.getMimetype();
-    return "data:" + mime + ";base64,"
-        + Base64.getEncoder().encodeToString(crop.getData().toByteArray());
+    return new VlmImage.Bytes(crop.getMimetype(), crop.getData());
   }
 
   private static ItemSkipped imageSkip(PictureItem picture, String selfRef) {
