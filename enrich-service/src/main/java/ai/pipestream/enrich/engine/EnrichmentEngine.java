@@ -162,7 +162,8 @@ public final class EnrichmentEngine {
             "this server does not accept a per-request VLM endpoint for "
                 + VlmEndpoint.origin(endpoint) + " (vlm_endpoint or chart_extraction.vlm_endpoint);"
                 + " its operator allows them with ENRICH_ALLOW_REQUEST_ENDPOINT or"
-                + " ENRICH_VLM_ENDPOINT_ALLOWLIST");
+                + " ENRICH_VLM_ENDPOINT_ALLOWLIST, and the origin of ENRICH_VLM_URL is"
+                + " always allowed");
       }
     }
     if (options.getVlmHeadersCount() > 0) {

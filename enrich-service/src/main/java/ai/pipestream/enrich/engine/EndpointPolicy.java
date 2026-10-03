@@ -16,10 +16,20 @@ import java.util.stream.Collectors;
  * {@code ENRICH_ALLOW_REQUEST_ENDPOINT} (any http or https URL) or names the
  * origins callers may use in {@code ENRICH_VLM_ENDPOINT_ALLOWLIST}.
  *
+ * <p><b>The operator's own origin is always allowed.</b> A request that names
+ * an endpoint on the same origin as {@code defaultEndpoint} reaches nothing
+ * the operator has not already pointed this server at. gRParse sends its
+ * operator settings in the per-request fields ({@code GRPARSE_ENRICH_VLM_ENDPOINT}
+ * as {@code vlm_endpoint}, chart preset URLs as
+ * {@code chart_extraction.vlm_endpoint}), so refusing them would drop all
+ * enrichment for a deployment that points both at the same VLM.
+ *
  * <p><b>The operator's key stays with the operator's endpoint.</b>
  * {@code defaultApiKey} is sent only on calls to {@code defaultEndpoint},
  * never to an endpoint a caller named, or allowing per-request endpoints
  * would let a caller collect the key by pointing the URL at its own server.
+ * That holds for a caller-named endpoint on the operator's own origin too:
+ * the key is attached only when the request names no endpoint at all.
  *
  * @param defaultEndpoint the operator's endpoint (ENRICH_VLM_URL); empty when
  *     unconfigured
@@ -51,13 +61,19 @@ public record EndpointPolicy(
     return new EndpointPolicy(defaultEndpoint, "", false, Set.of());
   }
 
-  /** Whether a caller may send this request's calls to {@code endpoint}. */
+  /**
+   * Whether a caller may send this request's calls to {@code endpoint}: any
+   * endpoint when the operator allows any, otherwise one whose origin is
+   * allowlisted or is the origin of {@code defaultEndpoint}.
+   */
   public boolean allowsRequestEndpoint(String endpoint) {
     if (allowAnyRequestEndpoint) {
       return true;
     }
     String origin = VlmEndpoint.origin(endpoint);
-    return !origin.isEmpty() && allowedRequestOrigins.contains(origin);
+    return !origin.isEmpty()
+        && (allowedRequestOrigins.contains(origin)
+            || origin.equals(VlmEndpoint.origin(defaultEndpoint)));
   }
 
   /** Never prints the key, and only the endpoint's origin. */

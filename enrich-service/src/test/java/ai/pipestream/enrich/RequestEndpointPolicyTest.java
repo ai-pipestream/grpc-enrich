@@ -33,8 +33,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * A per-request VLM endpoint is a server-side request the caller aims:
- * refused unless the operator allows it (any endpoint, or allowlisted
- * origins), never given the operator's key, and never a way to read what
+ * refused unless the operator allows it (any endpoint, allowlisted origins,
+ * or the origin of the operator's own endpoint), never given the operator's key, and never a way to read what
  * the target answered. Also covers the redacted default endpoint in
  * GetServiceInfo.
  */
@@ -117,6 +117,61 @@ class RequestEndpointPolicyTest {
       assertThat(refused.error().getStatus().getCode())
           .isEqualTo(Status.Code.PERMISSION_DENIED);
       assertThat(unlisted.calls()).isZero();
+    }
+  }
+
+  @Test
+  void requestEndpoint_onTheOperatorOrigin_isAllowedByDefault() throws Exception {
+    // gRParse sends GRPARSE_ENRICH_VLM_ENDPOINT as vlm_endpoint and a chart
+    // preset's url as chart_extraction.vlm_endpoint on every request; when
+    // they name ENRICH_VLM_URL's origin they work without an allowlist.
+    try (FakeVlmServer operator = new FakeVlmServer();
+        InProcessEnrich enrich = InProcessEnrich.start(
+            new EndpointPolicy(operator.url() + "/v1", OPERATOR_KEY, false, Set.of()))) {
+      Document document = Document.newBuilder()
+          .setName("mixed")
+          .addPictures(InProcessEnrich.picture("#/pictures/0").toBuilder()
+              .setLabel(DocItemLabel.DOC_ITEM_LABEL_CHART))
+          .addPictures(InProcessEnrich.picture("#/pictures/1"))
+          .build();
+      Collected result = enrich.run(EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setDoChartExtraction(true)
+          .setVlmEndpoint(operator.url() + "/v1/chat/completions")
+          .setChartExtraction(ChartExtractionOptions.newBuilder()
+              .setVlmEndpoint(operator.url() + "/"))
+          .setDocument(document)
+          .build());
+
+      assertThat(result.error()).isNull();
+      assertThat(result.annotations()).hasSize(2);
+      // Named by the caller, so the key stays off even on the operator's origin.
+      assertThat(operator.recorded()).hasSize(2).allSatisfy(request -> {
+        assertThat(request.header("Authorization")).isEmpty();
+        assertThat(request.headers().toString()).doesNotContain(OPERATOR_KEY);
+      });
+    }
+  }
+
+  @Test
+  void requestEndpoint_onlyTheOperatorOriginItself_isAllowedByDefault() throws Exception {
+    try (FakeVlmServer operator = new FakeVlmServer();
+        FakeVlmServer other = new FakeVlmServer();
+        InProcessEnrich enrich = InProcessEnrich.start(EndpointPolicy.defaultOnly(operator.url()))) {
+      String hostPort = operator.url().substring("http://".length());
+      for (String endpoint : List.of(
+          other.url(),
+          "https://" + hostPort,
+          "http://" + hostPort + "@evil.invalid/")) {
+        Collected result = enrich.run(describe(InProcessEnrich.pictures(1)).toBuilder()
+            .setVlmEndpoint(endpoint)
+            .build());
+        assertThat(result.error()).as(endpoint).isNotNull();
+        assertThat(result.error().getStatus().getCode()).as(endpoint)
+            .isEqualTo(Status.Code.PERMISSION_DENIED);
+      }
+      assertThat(operator.calls()).isZero();
+      assertThat(other.calls()).isZero();
     }
   }
 

@@ -29,6 +29,19 @@ class EnrichConfigTest {
   }
 
   @Test
+  void theVlmUrlOrigin_isAlwaysAllowed() {
+    var policy = EnrichConfig.from(Map.of("ENRICH_VLM_URL", URL_WITH_SECRETS)).endpointPolicy();
+    assertThat(policy.allowsRequestEndpoint("https://VLM.internal:8443/v1/chat/completions"))
+        .isTrue();
+    assertThat(policy.allowsRequestEndpoint("https://other:pw@vlm.internal:8443")).isTrue();
+    assertThat(policy.allowsRequestEndpoint("http://vlm.internal:8443")).isFalse();
+    assertThat(policy.allowsRequestEndpoint("https://vlm.internal")).isFalse();
+    assertThat(policy.allowsRequestEndpoint("https://vlm.internal.evil:8443")).isFalse();
+    assertThat(EnrichConfig.from(Map.of()).endpointPolicy().allowsRequestEndpoint(""))
+      .as("no ENRICH_VLM_URL allows nothing").isFalse();
+  }
+
+  @Test
   void allowRequestEndpoint_acceptsOnlyTrueOrFalse() {
     assertThat(EnrichConfig.from(Map.of("ENRICH_ALLOW_REQUEST_ENDPOINT", "TRUE"))
         .allowRequestEndpoint()).isTrue();

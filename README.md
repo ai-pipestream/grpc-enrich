@@ -50,7 +50,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Logs and `GetServiceInfo` show only its origin |
 | `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
 | `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
-| `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off |
+| `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off. The origin of `ENRICH_VLM_URL` is always allowed and need not be listed |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Process-wide cap on concurrent VLM calls, shared by every request; also bounds `EnrichOptions.concurrency` |
 | `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included), and the ceiling on `EnrichOptions.timeout_seconds` |
@@ -239,10 +239,14 @@ untrusted:
   the operator sets `ENRICH_ALLOW_REQUEST_ENDPOINT=true` (any http(s) URL:
   only when every caller may reach whatever this server can reach, cluster
   services and cloud metadata included) or lists the allowed origins in
-  `ENRICH_VLM_ENDPOINT_ALLOWLIST`, the safer choice. This mirrors Docling's
+  `ENRICH_VLM_ENDPOINT_ALLOWLIST`, the safer choice. An endpoint on the
+  same origin (scheme, host, port) as `ENRICH_VLM_URL` is always allowed,
+  since it is the operator's own. This mirrors Docling's
   `enable_remote_services`.
 - **The operator's key stays with the operator's endpoint.**
-  `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`. A caller's
+  `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`, and only on calls
+  whose request names no endpoint: a per-request endpoint never gets it,
+  even one on the same origin. A caller's
   `vlm_headers` are sent only to the endpoint that caller named, never to
   `ENRICH_VLM_URL`, and their values are never logged or echoed.
 - **No response echo.** A failure on a per-request endpoint is reported by
@@ -256,6 +260,24 @@ untrusted:
 - **The gRParse-to-enrich hop is plaintext gRPC.** `vlm_headers` (usually
   credentials) cross it in clear text: keep the service on a trusted
   network, or put TLS in front of it.
+
+### Upgrading: per-request endpoints from gRParse
+
+Earlier releases used any per-request endpoint. gRParse fills those fields
+from its own operator settings, not only from end users: it sends
+`GRPARSE_ENRICH_VLM_ENDPOINT` as `vlm_endpoint` on every request, and a
+chart preset's `url` as `chart_extraction.vlm_endpoint`. After the upgrade,
+a request naming any other origin fails with `PERMISSION_DENIED` and gets no
+enrichment. For each such URL, either:
+
+- point `ENRICH_VLM_URL` at the same origin (always allowed), or
+- list its origin in `ENRICH_VLM_ENDPOINT_ALLOWLIST`, for example
+  `ENRICH_VLM_ENDPOINT_ALLOWLIST=http://vlm:8086,http://chart-model:8087`.
+
+`ENRICH_ALLOW_REQUEST_ENDPOINT=true` also restores the old behaviour, but
+lets every caller aim this server at any host it can reach. If the VLM needs
+`ENRICH_VLM_API_KEY`, leave `GRPARSE_ENRICH_VLM_ENDPOINT` unset so gRParse's
+calls go to `ENRICH_VLM_URL` with the key.
 
 ## Start here (humans and LLMs)
 
