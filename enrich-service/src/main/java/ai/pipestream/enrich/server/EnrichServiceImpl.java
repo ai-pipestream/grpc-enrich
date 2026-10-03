@@ -2,6 +2,7 @@ package ai.pipestream.enrich.server;
 
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.enrich.engine.EnrichmentEngine;
+import ai.pipestream.enrich.engine.ItemSelector;
 import ai.pipestream.enrich.v1.EnrichDocumentRequest;
 import ai.pipestream.enrich.v1.EnrichDocumentResponse;
 import ai.pipestream.enrich.v1.EnrichOptions;
@@ -88,6 +89,13 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
             return;
           }
           options = request.getOptions();
+          if (options.hasChartExtraction()
+              && ItemSelector.enabledChartOutputs(options.getChartExtraction()).isEmpty()) {
+            // Docling's ChartExtractionVlmEngineOptions validator, same rule.
+            fail(Status.INVALID_ARGUMENT, "chart_extraction enables no output: at least one of "
+                + "csv, summary, or code must be true");
+            return;
+          }
           if (options.hasDocument()) {
             start(options.getDocument());
           }

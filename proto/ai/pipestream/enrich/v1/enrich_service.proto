@@ -111,6 +111,43 @@ message EnrichOptions {
   // The complete document to enrich, when it fits in one message. Absent
   // means the document follows as DocumentChunk messages.
   ai.pipestream.document.v1.Document document = 16;
+  // Which chart outputs to produce and which model and endpoint produce
+  // them. Absent keeps the original behaviour: one CSV table per chart from
+  // a fixed natural-language prompt, the model named by chart_preset /
+  // chart_preset_raw and the endpoint by vlm_endpoint. Present switches to
+  // the Docling chart stage: one VLM call per enabled output, each with its
+  // own prompt and post-processing, each answered by its own event.
+  ChartExtractionOptions chart_extraction = 17;
+}
+
+// The Docling chart-extraction stage (ChartExtractionVlmEngineOptions) as
+// typed switches: three independent outputs, the prompt dialect, and the
+// model and endpoint a custom configuration names. Each enabled output is
+// its own VLM call per chart and its own ItemAnnotation (or ItemSkipped), so
+// a failed summary never costs the table.
+message ChartExtractionOptions {
+  // Docling chart2csv: the chart's data as a typed table (ChartTable). Unset
+  // means true, the Docling default.
+  optional bool csv = 1;
+  // Docling chart2summary: a few sentences describing the chart
+  // (ChartSummary).
+  bool summary = 2;
+  // Docling chart2code: Python (matplotlib) code that recreates the chart
+  // (ChartCode).
+  bool code = 3;
+  // Send natural-language prompts instead of the Granite Vision special
+  // tokens (<chart2csv>, <chart2summary>, <chart2code>). For models that
+  // were not fine-tuned on those tokens, for example a GGUF quantization or
+  // a general-purpose VLM.
+  bool natural_language_prompts = 4;
+  // Model name for the chart calls. Non-empty overrides chart_preset and
+  // chart_preset_raw; empty falls back to them (and to the endpoint's
+  // default model when they are unset too).
+  string model = 5;
+  // VLM endpoint for the chart calls only. Non-empty overrides
+  // EnrichOptions.vlm_endpoint and the server default (ENRICH_VLM_URL), so
+  // charts can go to a chart model while pictures go elsewhere.
+  string vlm_endpoint = 6;
 }
 
 // One slice of a serialized ai.pipestream.document.v1.Document. Chunks are
@@ -156,7 +193,9 @@ message EnrichDocumentResponse {
 message EnrichStarted {
   // Pictures selected for description.
   uint32 picture_descriptions = 1;
-  // Pictures selected for chart extraction.
+  // Pictures selected for chart extraction. With
+  // EnrichOptions.chart_extraction present, each one is answered by one
+  // event per enabled output.
   uint32 chart_extractions = 2;
   // Code items selected for enrichment.
   uint32 code_enrichments = 3;
@@ -182,6 +221,10 @@ message ItemAnnotation {
     CodeAnnotation code = 5;
     // Enriched formula text.
     FormulaAnnotation formula = 6;
+    // A natural-language summary of a chart (ChartExtractionOptions.summary).
+    ChartSummary chart_summary = 7;
+    // Python code that recreates a chart (ChartExtractionOptions.code).
+    ChartCode chart_code = 8;
   }
 }
 
@@ -204,6 +247,24 @@ message ChartTable {
   ai.pipestream.document.v1.TableData table = 2;
   // The raw CSV the model returned, when it returned CSV.
   string csv = 3;
+}
+
+// A natural-language summary of a chart: the model's reply verbatim, the
+// way Docling stores chart2summary in the picture's meta.description.
+message ChartSummary {
+  // The summary text.
+  string text = 1;
+}
+
+// Code that recreates a chart: the body of the first fenced python block in
+// the model's reply, the way Docling stores chart2code in the picture's
+// meta.code. A reply without a fenced python block is an ItemSkipped, not an
+// empty annotation.
+message ChartCode {
+  // The code, without the fence.
+  string text = 1;
+  // The code's language; always CODE_LANGUAGE_LABEL_PYTHON today.
+  ai.pipestream.document.v1.CodeLanguageLabel language = 2;
 }
 
 // Enriched code text for a code item.
@@ -232,13 +293,30 @@ message ItemSkipped {
   SkipReason reason = 2;
   // Human-readable detail (for example the VLM endpoint's error).
   string detail = 3;
+  // For a chart item, which chart output this skip is about (one chart can
+  // produce a table, a summary and code, each skipped on its own).
+  // CHART_OUTPUT_UNSPECIFIED for every other item.
+  ChartOutput chart_output = 4;
+}
+
+// One output of the chart-extraction stage.
+enum ChartOutput {
+  // Not a chart output (picture description, code, formula items).
+  CHART_OUTPUT_UNSPECIFIED = 0;
+  // The chart's data table (ChartTable).
+  CHART_OUTPUT_CSV = 1;
+  // The chart's natural-language summary (ChartSummary).
+  CHART_OUTPUT_SUMMARY = 2;
+  // Code that recreates the chart (ChartCode).
+  CHART_OUTPUT_CODE = 3;
 }
 
 // Trailer event: final counts for the whole enrichment.
 message EnrichComplete {
-  // Items successfully annotated.
+  // Annotations emitted (one per chart output for a multi-output chart).
   uint32 succeeded = 1;
-  // Items skipped (no image, below threshold, or VLM error).
+  // Skips emitted (no image, below threshold, or VLM error; one per chart
+  // output that failed).
   uint32 skipped = 2;
   // Items that failed unexpectedly outside the VLM call. Normally zero; a
   // per-item failure that is not a clean skip lands here rather than failing
@@ -246,7 +324,10 @@ message EnrichComplete {
   uint32 failed = 3;
   // The full document with the emitted annotations applied, present only
   // when EnrichOptions.return_document was true. Picture descriptions and
-  // chart tables land in the picture's annotations list; code and formula
+  // chart tables land in the picture's annotations list; a chart summary
+  // lands in the picture's meta.description (and a description annotation)
+  // and chart code in its meta.code, each with created_by naming the model;
+  // code and formula
   // items have their text replaced (orig is never rewritten). Provenance
   // boxes are never touched.
   optional ai.pipestream.document.v1.Document document = 4;

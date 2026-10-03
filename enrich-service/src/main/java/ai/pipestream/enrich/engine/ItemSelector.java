@@ -10,6 +10,8 @@ import ai.pipestream.document.v1.PictureClassificationData;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.ProvenanceItem;
 import ai.pipestream.document.v1.Size;
+import ai.pipestream.enrich.v1.ChartExtractionOptions;
+import ai.pipestream.enrich.v1.ChartOutput;
 import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.ItemSkipped;
@@ -43,7 +45,10 @@ public final class ItemSelector {
     FORMULA
   }
 
-  /** One item selected for a VLM call. */
+  /** One item selected for a VLM call. A chart picture yields one work item
+   * per enabled chart output, each with its own prompt; {@code chartOutput}
+   * names which (UNSPECIFIED for every other kind). {@code endpoint} is the
+   * per-item endpoint override, or null for the request's endpoint. */
   public record WorkItem(
       String selfRef,
       Kind kind,
@@ -53,12 +58,30 @@ public final class ItemSelector {
       String text,
       int maxTokens,
       int pictureIndex,
-      int textIndex) {}
+      int textIndex,
+      ChartOutput chartOutput,
+      String endpoint) {
+
+    WorkItem(String selfRef, Kind kind, String model, String prompt, String imageDataUri,
+        String text, int maxTokens, int pictureIndex, int textIndex) {
+      this(selfRef, kind, model, prompt, imageDataUri, text, maxTokens, pictureIndex, textIndex,
+          ChartOutput.CHART_OUTPUT_UNSPECIFIED, null);
+    }
+  }
 
   /** The result of walking the document: work to run plus items skipped at
    * selection time (before any VLM call). */
   public record Selection(List<WorkItem> work, List<ItemSkipped> skips) {
+    /** Items of {@code kind} selected. Charts count pictures, not calls: a
+     * chart with three enabled outputs is one chart extraction. */
     public long count(Kind kind) {
+      if (kind == Kind.CHART) {
+        return work.stream()
+            .filter(item -> item.kind == Kind.CHART)
+            .mapToInt(WorkItem::pictureIndex)
+            .distinct()
+            .count();
+      }
       return work.stream().filter(item -> item.kind == kind).count();
     }
   }
@@ -82,8 +105,24 @@ public final class ItemSelector {
       "Describe this image in a few sentences.";
   private static final String DESCRIBE_PROMPT_GRANITE_VISION =
       "What is shown in this image?";
+  /** The original chart prompt, used only when EnrichOptions.chart_extraction
+   * is absent, so a v1 caller keeps getting exactly what it got. */
   private static final String CHART_PROMPT =
       "Convert the information in this chart into a data table in CSV format.";
+
+  // The Docling chart stage's prompts (docling granite_vision.py): the
+  // Granite Vision special tokens, and the natural-language equivalents
+  // Docling substitutes when use_natural_language_prompts is set. Verbatim.
+  static final String CHART2CSV_TOKEN = "<chart2csv>";
+  static final String CHART2SUMMARY_TOKEN = "<chart2summary>";
+  static final String CHART2CODE_TOKEN = "<chart2code>";
+  static final String CHART2CSV_NATURAL =
+      "Convert the information in this chart into a data table in CSV format "
+          + "with a header row and numeric values.";
+  static final String CHART2SUMMARY_NATURAL = "Describe this chart in a few sentences.";
+  static final String CHART2CODE_NATURAL =
+      "Write Python code using matplotlib that recreates this chart. "
+          + "Return only a fenced ```python code block.";
   private static final String CODE_IMAGE_PROMPT = "<code>";
   private static final String FORMULA_IMAGE_PROMPT = "<formula>";
 
@@ -125,8 +164,7 @@ public final class ItemSelector {
         continue;
       }
       if (chartJob) {
-        work.add(new WorkItem(selfRef, Kind.CHART, chartModel(options), CHART_PROMPT, image,
-            null, MAX_TOKENS_CHART, i, -1));
+        addChartWork(work, selfRef, image, i, options);
       } else {
         work.add(new WorkItem(selfRef, Kind.DESCRIPTION, descriptionModel(options),
             describePrompt(options), image, null, MAX_TOKENS_DESCRIPTION, i, -1));
@@ -165,6 +203,53 @@ public final class ItemSelector {
     }
 
     return new Selection(work, skips);
+  }
+
+  /** One work item per enabled chart output, in Docling's order (csv,
+   * summary, code). Without ChartExtractionOptions: the original single CSV
+   * call with its original prompt. */
+  private static void addChartWork(
+      List<WorkItem> work, String selfRef, String image, int pictureIndex,
+      EnrichOptions options) {
+    if (!options.hasChartExtraction()) {
+      work.add(new WorkItem(selfRef, Kind.CHART, chartModel(options), CHART_PROMPT, image,
+          null, MAX_TOKENS_CHART, pictureIndex, -1, ChartOutput.CHART_OUTPUT_CSV, null));
+      return;
+    }
+    ChartExtractionOptions chart = options.getChartExtraction();
+    String model = chart.getModel().isEmpty() ? chartModel(options) : chart.getModel();
+    String endpoint = chart.getVlmEndpoint().isEmpty() ? null : chart.getVlmEndpoint();
+    boolean natural = chart.getNaturalLanguagePrompts();
+    for (ChartOutput output : enabledChartOutputs(chart)) {
+      work.add(new WorkItem(selfRef, Kind.CHART, model, chartPrompt(output, natural), image,
+          null, MAX_TOKENS_CHART, pictureIndex, -1, output, endpoint));
+    }
+  }
+
+  /** The chart outputs {@code chart} enables, in Docling's order. csv is on
+   * unless explicitly set false. */
+  public static List<ChartOutput> enabledChartOutputs(ChartExtractionOptions chart) {
+    List<ChartOutput> outputs = new ArrayList<>(3);
+    if (!chart.hasCsv() || chart.getCsv()) {
+      outputs.add(ChartOutput.CHART_OUTPUT_CSV);
+    }
+    if (chart.getSummary()) {
+      outputs.add(ChartOutput.CHART_OUTPUT_SUMMARY);
+    }
+    if (chart.getCode()) {
+      outputs.add(ChartOutput.CHART_OUTPUT_CODE);
+    }
+    return outputs;
+  }
+
+  /** The wire prompt for one chart output: the special token, or Docling's
+   * natural-language equivalent. */
+  static String chartPrompt(ChartOutput output, boolean natural) {
+    return switch (output) {
+      case CHART_OUTPUT_SUMMARY -> natural ? CHART2SUMMARY_NATURAL : CHART2SUMMARY_TOKEN;
+      case CHART_OUTPUT_CODE -> natural ? CHART2CODE_NATURAL : CHART2CODE_TOKEN;
+      default -> natural ? CHART2CSV_NATURAL : CHART2CSV_TOKEN;
+    };
   }
 
   private static String selfRef(String declared, String prefix, int index) {
