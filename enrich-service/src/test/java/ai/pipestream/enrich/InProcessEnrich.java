@@ -34,6 +34,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -53,19 +54,28 @@ final class InProcessEnrich implements AutoCloseable {
   final EnrichServiceGrpc.EnrichServiceStub stub;
   private final Server server;
   private final ManagedChannel channel;
+  /** Deadline timers for the server and channel, or null for gRPC's own. */
+  private final ScheduledExecutorService timers;
   private EnrichHttpServer http;
 
   private InProcessEnrich(VlmClient.Factory clients, EndpointPolicy endpoints,
-      int defaultConcurrency, int maxConcurrency, Duration timeout, long maxDocumentBytes)
-      throws IOException {
+      int defaultConcurrency, int maxConcurrency, Duration timeout, long maxDocumentBytes,
+      ScheduledExecutorService timers) throws IOException {
+    this.timers = timers;
     engine = new EnrichmentEngine(clients, endpoints, defaultConcurrency, maxConcurrency,
         timeout, executor);
     service = new EnrichServiceImpl(maxDocumentBytes, engine, executor,
         endpoints.defaultEndpoint(), maxConcurrency);
     String name = InProcessServerBuilder.generateName();
-    server = InProcessServerBuilder.forName(name).directExecutor().addService(service).build()
-        .start();
-    channel = InProcessChannelBuilder.forName(name).directExecutor().build();
+    InProcessServerBuilder serverBuilder =
+        InProcessServerBuilder.forName(name).directExecutor().addService(service);
+    InProcessChannelBuilder channelBuilder = InProcessChannelBuilder.forName(name).directExecutor();
+    if (timers != null) {
+      serverBuilder.scheduledExecutorService(timers);
+      channelBuilder.scheduledExecutorService(timers);
+    }
+    server = serverBuilder.build().start();
+    channel = channelBuilder.build();
     stub = EnrichServiceGrpc.newStub(channel);
   }
 
@@ -84,7 +94,19 @@ final class InProcessEnrich implements AutoCloseable {
       int defaultConcurrency, int maxConcurrency, Duration timeout, long maxDocumentBytes)
       throws IOException {
     return new InProcessEnrich(clients, endpoints, defaultConcurrency, maxConcurrency, timeout,
-        maxDocumentBytes);
+        maxDocumentBytes, null);
+  }
+
+  /**
+   * Like {@link #start(VlmClient.Factory, EndpointPolicy, int, int, Duration, long)}, with
+   * {@code timers} running the deadline timers of both the server and the channel, so a test
+   * decides when a deadline fires. Closed with this harness.
+   */
+  static InProcessEnrich start(VlmClient.Factory clients, EndpointPolicy endpoints,
+      int defaultConcurrency, int maxConcurrency, Duration timeout, long maxDocumentBytes,
+      ScheduledExecutorService timers) throws IOException {
+    return new InProcessEnrich(clients, endpoints, defaultConcurrency, maxConcurrency, timeout,
+        maxDocumentBytes, timers);
   }
 
   /** Starts the HTTP front end on an ephemeral port and returns its base URL. */
@@ -104,6 +126,9 @@ final class InProcessEnrich implements AutoCloseable {
     channel.shutdownNow();
     server.shutdownNow();
     executor.shutdownNow();
+    if (timers != null) {
+      timers.shutdownNow();
+    }
   }
 
   /** Everything one RPC produced: its events and how it ended. */

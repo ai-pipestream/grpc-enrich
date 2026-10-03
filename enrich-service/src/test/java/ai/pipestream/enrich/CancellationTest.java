@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -53,6 +55,37 @@ class CancellationTest {
           throw new VlmException("interrupted");
         }
       };
+    }
+  }
+
+  /**
+   * Deadline timers that fire only once released: a timer still runs no
+   * earlier than its delay, but also no earlier than {@link #release()}. A
+   * test holds a deadline until the work it should interrupt is in flight,
+   * however long a cold or loaded JVM takes to get there.
+   */
+  private static final class HeldTimers extends ScheduledThreadPoolExecutor {
+    private final CountDownLatch released = new CountDownLatch(1);
+
+    HeldTimers() {
+      super(2);
+    }
+
+    void release() {
+      released.countDown();
+    }
+
+    @Override
+    public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+      return super.schedule(() -> {
+        try {
+          released.await();
+        } catch (InterruptedException shutdown) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+        command.run();
+      }, delay, unit);
     }
   }
 
@@ -92,13 +125,20 @@ class CancellationTest {
   @Test
   void expiredDeadline_interruptsInFlightCallsAndStartsNoMore() throws Exception {
     StuckVlm vlm = new StuckVlm();
-    try (InProcessEnrich enrich = start(vlm)) {
+    HeldTimers timers = new HeldTimers();
+    try (InProcessEnrich enrich = InProcessEnrich.start(vlm.factory(),
+        EndpointPolicy.defaultOnly("http://vlm.invalid"), 4, 16, Duration.ofSeconds(30),
+        64L * 1024 * 1024, timers)) {
       BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
       StreamObserver<EnrichDocumentRequest> requester =
           enrich.stub.withDeadlineAfter(500, TimeUnit.MILLISECONDS)
               .enrichDocument(InProcessEnrich.inbox(inbox));
       requester.onNext(InProcessEnrich.options(describe(20, 3)));
       requester.onCompleted();
+      // The deadline must expire with the calls in flight, not before the
+      // first one started: it is held until all three have.
+      await().atMost(Duration.ofSeconds(10)).until(() -> vlm.started.get() == 3);
+      timers.release();
 
       InProcessEnrich.Collected result = InProcessEnrich.collect(inbox);
       assertThat(result.error()).isNotNull();
