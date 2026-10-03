@@ -30,6 +30,7 @@ class VlmClientAdversarialTest {
   private static final class RawVlmServer implements AutoCloseable {
     final HttpServer server;
     final List<String> paths = new ArrayList<>();
+    final List<String> queries = new ArrayList<>();
     final AtomicInteger calls = new AtomicInteger();
     volatile int status = 200;
     volatile String body = "";
@@ -41,6 +42,7 @@ class VlmClientAdversarialTest {
         calls.incrementAndGet();
         synchronized (paths) {
           paths.add(exchange.getRequestURI().getPath());
+          queries.add(exchange.getRequestURI().getRawQuery());
         }
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         if (retryAfter != null) {
@@ -243,6 +245,41 @@ class VlmClientAdversarialTest {
           new OpenAiCompatVlmClient(vlm.url() + "/models/llama", Duration.ofMillis(1));
       assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/models/llama/v1/chat/completions");
+    }
+  }
+
+  @Test
+  void endpointFullUrlWithQuery_usedVerbatim() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      vlm.body = chatBody("\"ok\"");
+      OpenAiCompatVlmClient client = new OpenAiCompatVlmClient(
+          vlm.url() + "/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
+          Duration.ofMillis(1));
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(vlm.paths.get(0)).isEqualTo("/openai/deployments/gpt-4o/chat/completions");
+      assertThat(vlm.queries.get(0)).isEqualTo("api-version=2024-10-21");
+    }
+  }
+
+  @Test
+  void endpointNonV1CompletionsPath_usedVerbatim() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      vlm.body = chatBody("\"ok\"");
+      OpenAiCompatVlmClient client =
+          new OpenAiCompatVlmClient(vlm.url() + "/v3/chat/completions", Duration.ofMillis(1));
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(vlm.paths.get(0)).isEqualTo("/v3/chat/completions");
+    }
+  }
+
+  @Test
+  void endpointVersionedBase_getsOnlyChatCompletions() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      vlm.body = chatBody("\"ok\"");
+      OpenAiCompatVlmClient client =
+          new OpenAiCompatVlmClient(vlm.url() + "/v3", Duration.ofMillis(1));
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(vlm.paths.get(0)).isEqualTo("/v3/chat/completions");
     }
   }
 

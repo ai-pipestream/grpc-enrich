@@ -16,9 +16,8 @@ import java.util.Set;
 /**
  * VLM client for any OpenAI-compatible chat-completions endpoint (llama.cpp's
  * server, OVMS, vLLM, and friends). The endpoint is a base URL such as
- * {@code http://vlm:8080}; the request goes to
- * {@code <endpoint>/v1/chat/completions} unless the endpoint already ends with
- * that path.
+ * {@code http://vlm:8080} or a full endpoint URL; {@link VlmEndpoint} has the
+ * rule for which is which.
  *
  * <p>Retry behavior: up to 5 retries on HTTP 429/500/502/503/504 and on
  * connection-level failures (a starting vLLM endpoint commonly drops
@@ -32,7 +31,6 @@ import java.util.Set;
  */
 public final class OpenAiCompatVlmClient implements VlmClient {
 
-  private static final String COMPLETIONS_PATH = "/v1/chat/completions";
   private static final int MAX_RETRIES = 5;
   private static final Duration DEFAULT_BASE_BACKOFF = Duration.ofMillis(100);
   private static final Set<Integer> RETRYABLE_STATUSES = Set.of(429, 500, 502, 503, 504);
@@ -46,7 +44,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
   private static final HttpClient SHARED_HTTP =
       HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
-  private final String completionsUrl;
+  private final URI completionsUri;
   private final HttpClient http;
   private final Duration baseBackoff;
 
@@ -54,11 +52,14 @@ public final class OpenAiCompatVlmClient implements VlmClient {
     this(endpoint, DEFAULT_BASE_BACKOFF);
   }
 
-  /** Test seam: {@code baseBackoff} shrinks the retry waits. */
+  /**
+   * Test seam: {@code baseBackoff} shrinks the retry waits.
+   *
+   * @throws IllegalArgumentException when {@code endpoint} is not an http or
+   *     https URL with a host
+   */
   public OpenAiCompatVlmClient(String endpoint, Duration baseBackoff) {
-    String trimmed = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
-    this.completionsUrl =
-        trimmed.endsWith(COMPLETIONS_PATH) ? trimmed : trimmed + COMPLETIONS_PATH;
+    this.completionsUri = VlmEndpoint.completionsUri(endpoint);
     this.http = SHARED_HTTP;
     this.baseBackoff = baseBackoff;
   }
@@ -68,7 +69,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       Duration timeout)
       throws VlmException {
     HttpRequest request =
-        HttpRequest.newBuilder(URI.create(completionsUrl))
+        HttpRequest.newBuilder(completionsUri)
             .timeout(timeout)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(

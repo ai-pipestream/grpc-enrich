@@ -96,7 +96,10 @@ message EnrichOptions {
   // CODE_FORMULA_PRESET_UNSPECIFIED. Passed through to the endpoint.
   string code_formula_preset_raw = 11;
   // Per-request override of the VLM endpoint URL. When empty the server's
-  // configured default (ENRICH_VLM_URL) is used.
+  // configured default (ENRICH_VLM_URL) is used. Either a base URL (the
+  // server appends /v1/chat/completions) or a full endpoint URL: one whose
+  // path ends in /chat/completions, or that carries a query string, is used
+  // verbatim.
   string vlm_endpoint = 12;
   // Maximum number of VLM calls in flight for this request. Zero uses the
   // server's configured default; values above the server cap are clamped.

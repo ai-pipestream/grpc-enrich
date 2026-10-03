@@ -47,7 +47,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 |---|---|---|
 | `ENRICH_PORT` | `50056` | gRPC listen port |
 | `ENRICH_HTTP_PORT` | `50068` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
-| `ENRICH_VLM_URL` | unset | Default VLM endpoint (base URL; the client posts to `<url>/v1/chat/completions`). Per-request `EnrichOptions.vlm_endpoint` overrides |
+| `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Per-request `EnrichOptions.vlm_endpoint` overrides |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Assembled document byte cap (`RESOURCE_EXHAUSTED` above) |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
 | `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout |
@@ -189,6 +189,19 @@ retried up to 5 times with exponential backoff starting at 0.1s, then the
 item is skipped with `SKIP_REASON_VLM_ERROR` rather than failing the RPC.
 Every skip carries an explicit reason, and description annotations record the
 model name as provenance.
+
+## VLM endpoint URLs
+
+`ENRICH_VLM_URL`, `EnrichOptions.vlm_endpoint`, and
+`chart_extraction.vlm_endpoint` take either a base URL or a full endpoint
+URL, so Docling's `picture_description_api.url` works as given:
+
+| Given | Requests go to |
+|---|---|
+| `http://vlm:8080` (an origin, or a proxy prefix such as `http://proxy/llama`) | `<url>/v1/chat/completions` |
+| `https://api.example.com/v1`, `http://ovms:8000/v3` (path ends in a version) | `<url>/chat/completions` |
+| `http://localhost:8000/v1/chat/completions`, `http://ovms:8000/v3/chat/completions` | used verbatim |
+| any URL with a query string (Azure `...?api-version=...`) | used verbatim |
 
 ## Start here (humans and LLMs)
 
