@@ -76,6 +76,21 @@ public record EndpointPolicy(
             || origin.equals(VlmEndpoint.origin(defaultEndpoint)));
   }
 
+  /**
+   * Whether calls to the caller-named {@code endpoint} must go to a checked
+   * public address: it is allowed only because the operator allows any
+   * endpoint, not because the operator named its origin.
+   */
+  public boolean requiresPublicAddress(String endpoint) {
+    if (!allowAnyRequestEndpoint) {
+      return false;
+    }
+    String origin = VlmEndpoint.origin(endpoint);
+    return origin.isEmpty()
+        || !(allowedRequestOrigins.contains(origin)
+            || origin.equals(VlmEndpoint.origin(defaultEndpoint)));
+  }
+
   /** Never prints the key, and only the endpoint's origin. */
   @Override
   public String toString() {

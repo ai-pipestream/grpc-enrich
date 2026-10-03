@@ -141,6 +141,16 @@ final class FakeVlmServer implements AutoCloseable {
     return "http://127.0.0.1:" + server.getAddress().getPort();
   }
 
+  /**
+   * This server under a public-looking name, for a caller endpoint that the
+   * ENRICH_ALLOW_REQUEST_ENDPOINT mode checks: {@link InProcessEnrich}
+   * resolves every {@code .test} name to a public address and routes that
+   * address back here.
+   */
+  String publicUrl() {
+    return "http://vlm.test:" + server.getAddress().getPort();
+  }
+
   @Override
   public void close() {
     server.stop(0);

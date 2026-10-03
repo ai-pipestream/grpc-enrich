@@ -1,6 +1,7 @@
 package ai.pipestream.enrich.vlm;
 
 import com.google.protobuf.ByteString;
+import java.net.InetAddress;
 import java.time.Duration;
 import java.util.List;
 import java.util.OptionalDouble;
@@ -22,6 +23,10 @@ public interface VlmClient {
    *     times out, or returns an unparseable or oversized body
    */
   String complete(VlmRequest request) throws VlmException;
+
+  /** Releases what this client holds for itself (a connection pool of its
+   * own); a no-op for one that shares the process's. */
+  default void close() {}
 
   /**
    * Runs one completion with only a token cap: no sampling parameters and no
@@ -135,5 +140,18 @@ public interface VlmClient {
   @FunctionalInterface
   interface Factory {
     VlmClient create(String endpoint);
+
+    /**
+     * A client bound to {@code endpoint} whose calls connect to
+     * {@code address} only, never resolving the endpoint's host again,
+     * while still presenting that host name (Host header, TLS server name
+     * and certificate check). A factory that cannot pin refuses, so a
+     * caller-chosen endpoint is never called unpinned.
+     *
+     * @throws IllegalArgumentException when this factory cannot pin
+     */
+    default VlmClient createPinned(String endpoint, InetAddress address) {
+      throw new IllegalArgumentException("this VLM client cannot pin an endpoint's address");
+    }
   }
 }

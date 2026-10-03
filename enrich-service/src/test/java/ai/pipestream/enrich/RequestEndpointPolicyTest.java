@@ -83,7 +83,7 @@ class RequestEndpointPolicyTest {
         InProcessEnrich enrich = InProcessEnrich.start(allowAny(operator.url()))) {
       target.responder = body -> "from the caller's endpoint";
       Collected result = enrich.run(describe(InProcessEnrich.pictures(1)).toBuilder()
-          .setVlmEndpoint(target.url())
+          .setVlmEndpoint(target.publicUrl())
           .build());
 
       assertThat(result.error()).isNull();
@@ -220,7 +220,7 @@ class RequestEndpointPolicyTest {
           .map(EnrichDocumentResponse::getSkipped))
           .singleElement()
           .satisfies(skip -> {
-            assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
+            assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_ENDPOINT_REFUSED);
             assertThat(skip.getDetail()).contains("not allowed");
           });
       assertThat(target.calls()).isZero();
@@ -248,7 +248,7 @@ class RequestEndpointPolicyTest {
           .setDoPictureDescription(true)
           .setDoChartExtraction(true)
           .setChartExtraction(ChartExtractionOptions.newBuilder()
-              .setVlmEndpoint(chartModel.url()))
+              .setVlmEndpoint(chartModel.publicUrl()))
           .setDocument(document)
           .build());
 
@@ -272,7 +272,7 @@ class RequestEndpointPolicyTest {
         InProcessEnrich enrich = InProcessEnrich.start(
             new EndpointPolicy(operator.url(), OPERATOR_KEY, true, Set.of()))) {
       Collected result = enrich.run(describe(InProcessEnrich.pictures(2)).toBuilder()
-          .setVlmEndpoint(target.url())
+          .setVlmEndpoint(target.publicUrl())
           .build());
 
       assertThat(result.error()).isNull();
@@ -295,7 +295,7 @@ class RequestEndpointPolicyTest {
       target.status = 404;
       target.errorBody = "<html>INTERNAL-ADMIN-PAGE db_password=hunter2</html>";
       Collected result = enrich.run(describe(InProcessEnrich.pictures(1)).toBuilder()
-          .setVlmEndpoint(target.url())
+          .setVlmEndpoint(target.publicUrl())
           .build());
 
       assertThat(result.error()).isNull();
@@ -312,7 +312,7 @@ class RequestEndpointPolicyTest {
         InProcessEnrich enrich = InProcessEnrich.start(allowAny(""))) {
       target.rawOkBody = "{\"instance-id\":\"i-0SECRET\",\"role\":\"metadata-admin\"}";
       Collected result = enrich.run(describe(InProcessEnrich.pictures(1)).toBuilder()
-          .setVlmEndpoint(target.url())
+          .setVlmEndpoint(target.publicUrl())
           .build());
 
       assertThat(result.skips()).singleElement().satisfies(skip -> {
@@ -344,7 +344,7 @@ class RequestEndpointPolicyTest {
         }
       });
       Collected result = enrich.run(describe(InProcessEnrich.pictures(1)).toBuilder()
-          .setVlmEndpoint("http://127.0.0.1:" + banner.getLocalPort())
+          .setVlmEndpoint("http://banner.test:" + banner.getLocalPort())
           .build());
 
       assertThat(result.skips()).singleElement().satisfies(skip -> {

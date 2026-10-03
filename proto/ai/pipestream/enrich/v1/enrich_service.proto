@@ -412,6 +412,12 @@ enum SkipReason {
   // The VLM call failed: endpoint unreachable, non-200 response, timeout, or
   // an unparseable reply.
   SKIP_REASON_VLM_ERROR = 4;
+  // The server's endpoint policy refuses the endpoint the request named for
+  // this item: per-request endpoints are not allowed, or, with
+  // ENRICH_ALLOW_REQUEST_ENDPOINT, its host resolves to a loopback, private,
+  // link-local, or other non-public address. An operator allows such an
+  // endpoint by listing its origin in ENRICH_VLM_ENDPOINT_ALLOWLIST.
+  SKIP_REASON_ENDPOINT_REFUSED = 5;
 }
 
 // Picture-description model families served by the remote endpoint. UNSPECIFIED plus picture_description_preset_raw addresses
@@ -448,8 +454,7 @@ enum CodeFormulaPreset {
 }
 
 // Empty request for capability discovery.
-message GetServiceInfoRequest {
-}
+message GetServiceInfoRequest {}
 
 // Server identity and operational limits, for capability discovery.
 message GetServiceInfoResponse {

@@ -200,7 +200,7 @@ class PictureDescriptionApiTest {
           .setDoPictureDescription(true)
           .setDoChartExtraction(true)
           .setChartExtraction(ChartExtractionOptions.newBuilder()
-              .setVlmEndpoint(chartModel.url()))
+              .setVlmEndpoint(chartModel.publicUrl()))
           .addVlmHeaders(header("Authorization", "Bearer " + CALLER_TOKEN))
           .addVlmHeaders(header("X-Tenant", "acme"))
           .setDocument(document)
@@ -252,7 +252,7 @@ class PictureDescriptionApiTest {
           header("X-Huge", CALLER_TOKEN + "x".repeat(9000)));
       for (VlmHeader bad : refused) {
         Collected result = enrich.run(describe(1)
-            .setVlmEndpoint(target.url())
+            .setVlmEndpoint(target.publicUrl())
             .addVlmHeaders(bad)
             .build());
         assertThat(result.error()).as(bad.getName()).isNotNull();
@@ -269,7 +269,7 @@ class PictureDescriptionApiTest {
   void tooManyHeaders_areInvalidArgument() throws Exception {
     try (FakeVlmServer target = new FakeVlmServer();
         InProcessEnrich enrich = InProcessEnrich.start(allowAny(""))) {
-      EnrichOptions.Builder options = describe(1).setVlmEndpoint(target.url());
+      EnrichOptions.Builder options = describe(1).setVlmEndpoint(target.publicUrl());
       for (int i = 0; i < 33; i++) {
         options.addVlmHeaders(header("X-Header-" + i, "v"));
       }
@@ -297,7 +297,7 @@ class PictureDescriptionApiTest {
       System.setOut(capture);
       System.setErr(capture);
       Collected result = enrich.run(describe(3)
-          .setVlmEndpoint(target.url())
+          .setVlmEndpoint(target.publicUrl())
           .setConcurrency(1)
           .addVlmHeaders(header("Authorization", "Bearer " + CALLER_TOKEN))
           .build());
@@ -338,7 +338,7 @@ class PictureDescriptionApiTest {
         InProcessEnrich enrich = InProcessEnrich.start(allowAny(""))) {
       target.responder = body -> "described over HTTP";
       String body = "{\"options\":{\"doPictureDescription\":true,"
-          + "\"vlmEndpoint\":\"" + target.url() + "/v1/chat/completions\","
+          + "\"vlmEndpoint\":\"" + target.publicUrl() + "/v1/chat/completions\","
           + "\"pictureDescriptionPrompt\":\"What is this?\","
           + "\"pictureDescriptionParams\":{\"model\":\"m\",\"maxTokens\":64,\"seed\":\"7\"},"
           + "\"vlmHeaders\":[{\"name\":\"Authorization\",\"value\":\"Bearer " + CALLER_TOKEN
