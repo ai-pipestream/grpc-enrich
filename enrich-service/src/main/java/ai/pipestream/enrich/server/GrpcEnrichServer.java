@@ -2,6 +2,7 @@ package ai.pipestream.enrich.server;
 
 import ai.pipestream.enrich.engine.EnrichmentEngine;
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
+import ai.pipestream.enrich.vlm.VlmEndpoint;
 import io.grpc.Grpc;
 import io.grpc.InsecureServerCredentials;
 import io.grpc.Server;
@@ -32,7 +33,7 @@ public final class GrpcEnrichServer {
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     EnrichmentEngine engine = new EnrichmentEngine(
         OpenAiCompatVlmClient::new,
-        config.vlmUrl(),
+        config.endpointPolicy(),
         config.maxConcurrentVlm(),
         config.maxConcurrentVlm(),
         config.vlmTimeout(),
@@ -78,12 +79,20 @@ public final class GrpcEnrichServer {
             .addService(ProtoReflectionServiceV1.newInstance())
             .build()
             .start();
-    System.out.println("grpc-enrich " + EnrichServiceImpl.SERVICE_VERSION
-        + " listening on 0.0.0.0:" + config.port() + " (vlm endpoint: "
-        + (config.vlmUrl().isEmpty() ? "unconfigured" : config.vlmUrl()) + ", max "
-        + (config.maxDocumentBytes() >> 20) + " MiB, " + config.maxConcurrentVlm()
-        + " concurrent VLM calls)");
+    System.out.println(startupLine(config));
     return server;
+  }
+
+  /** The listening line. The VLM URL is reduced to its origin and the key is
+   * never mentioned beyond whether one is set: either may be a credential. */
+  static String startupLine(EnrichConfig config) {
+    return "grpc-enrich " + EnrichServiceImpl.SERVICE_VERSION
+        + " listening on 0.0.0.0:" + config.port() + " (vlm endpoint: "
+        + (config.vlmUrl().isEmpty() ? "unconfigured" : VlmEndpoint.origin(config.vlmUrl()))
+        + (config.vlmApiKey().isEmpty() ? "" : " with API key")
+        + ", per-request endpoints: " + config.requestEndpointMode()
+        + ", max " + (config.maxDocumentBytes() >> 20) + " MiB, "
+        + config.maxConcurrentVlm() + " concurrent VLM calls)";
   }
 
   /** Starts the HTTP front end, or returns null when it is disabled. */

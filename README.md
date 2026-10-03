@@ -47,10 +47,13 @@ ENRICH_VLM_URL=http://localhost:8080 \
 |---|---|---|
 | `ENRICH_PORT` | `50056` | gRPC listen port |
 | `ENRICH_HTTP_PORT` | `50068` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
-| `ENRICH_VLM_URL` | unset | Default VLM endpoint (base URL; the client posts to `<url>/v1/chat/completions`). Per-request `EnrichOptions.vlm_endpoint` overrides |
-| `ENRICH_MAX_DOCUMENT_MIB` | `70` | Assembled document byte cap (`RESOURCE_EXHAUSTED` above) |
-| `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
-| `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout |
+| `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Logs and `GetServiceInfo` show only its origin |
+| `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
+| `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
+| `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off. The origin of `ENRICH_VLM_URL` is always allowed and need not be listed |
+| `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
+| `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Process-wide cap on concurrent VLM calls, shared by every request; also bounds `EnrichOptions.concurrency` |
+| `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included), and the ceiling on `EnrichOptions.timeout_seconds` |
 | `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables |
 
 The server registers `grpc.health.v1.Health` and server reflection (v1 and
@@ -65,15 +68,19 @@ v1alpha).
   the first message carries `EnrichOptions` (one boolean per job:
   `do_picture_description`, `do_chart_extraction`, `do_code_enrichment`,
   `do_formula_enrichment`, enum presets with `*_raw` fallbacks, endpoint /
-  concurrency / timeout overrides) plus the document inline or as
-  `DocumentChunk` slices; `ItemImage` messages carry stripped crops.
+  concurrency / timeout overrides, and Docling's `picture_description_api`
+  extras as typed fields: `picture_description_prompt`,
+  `picture_description_params` (model, max_tokens, temperature, top_p, seed),
+  and `vlm_headers` for a per-request endpoint) plus the document inline or as
+  `DocumentChunk` slices; `ItemImage` messages carry stripped crops, sent
+  before the chunk marked complete (at most 100000, inside the byte cap).
   Events: `EnrichStarted` (counts selected), one `ItemAnnotation` or
   `ItemSkipped` per item as that VLM call returns, `EnrichComplete` trailer.
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
   VLM call is an `ItemSkipped` (`SKIP_REASON_VLM_ERROR`), never an RPC error.
-- `GetServiceInfo`: versions, default endpoint, byte cap, concurrency cap, and
-  the `UiInfo` frontend advertisement (tab title/path/tooltip) shared with the
-  other ai-pipestream services.
+- `GetServiceInfo`: versions, the default endpoint's origin, byte cap,
+  process-wide concurrency cap, and the `UiInfo` frontend advertisement (tab
+  title/path/tooltip) shared with the other ai-pipestream services.
 
 `ai/pipestream/document/v1/document.proto` is vendored verbatim from gRParse
 (the canonical copy); do not edit it here.
@@ -99,18 +106,24 @@ Request body for both enrich endpoints:
 `options` is an `EnrichOptions` message (the document may ride inline in
 `options.document`, as here) and `document` is an optional top-level
 `Document` message (mutually exclusive with `options.document`; it goes the
-chunked route, so `item_images` crops apply and the byte cap is enforced).
+chunked route, so `item_images` crops apply). The byte cap applies either
+way. A body over 4/3 of the byte cap plus 1 MiB is answered 413 before it is
+parsed (from `Content-Length` when present, without reading the body).
 
 - `POST /v1/enrich`: collects the whole stream and returns it at once:
   `{"events": [<EnrichDocumentResponse as proto3 JSON>, ...]}` in stream
   order (started, per-item annotation/skipped, complete trailer).
   `200` on success, `400` on `INVALID_ARGUMENT` (malformed JSON, no
-  document), `413` on `RESOURCE_EXHAUSTED` (byte cap), `500` otherwise.
+  document), `403` on `PERMISSION_DENIED` (a per-request endpoint the
+  operator has not allowed), `413` on `RESOURCE_EXHAUSTED` (byte cap, body
+  limit), `500` otherwise.
 - `POST /v1/enrich/stream`: the same request, answered as chunked NDJSON
   (`application/x-ndjson`): each `EnrichDocumentResponse` is written as one
   flushed line the moment the stream produces it, so HTTP callers see the
   same live per-item events gRPC clients get. A mid-stream failure ends the
-  response with a final `{"error": "..."}` line.
+  response with a final `{"error": "..."}` line. When the client hangs up,
+  the next event write fails and the call is cancelled, so its VLM calls
+  stop.
 - `GET /healthz`: `200 ok` when the server is up.
 
 ```sh
@@ -143,10 +156,11 @@ does not re-run layout.
 
 Prompts are fixed per job. Picture description: `Describe this image in a few
 sentences.` (SmolVLM preset) or `What is shown in this image?` (Granite
-Vision preset). Chart, without `EnrichOptions.chart_extraction`: one call
-per chart, `Convert the information in this chart into a data table in CSV
-format.` Code and formula with an image crop: the bare `<code>` /
-`<formula>`.
+Vision preset), unless `picture_description_prompt` replaces it (Docling
+`picture_description_api.prompt`). Chart, without
+`EnrichOptions.chart_extraction`: one call per chart, `Convert the
+information in this chart into a data table in CSV format.` Code and
+formula with an image crop: the bare `<code>` / `<formula>`.
 
 Chart outputs (`EnrichOptions.chart_extraction`, the Docling chart stage).
 Three independent outputs, each its own VLM call per chart and its own event:
@@ -183,12 +197,87 @@ only when all its values are non-numeric; any non-numeric data cell is marked
 
 Generation budgets (`max_tokens`): description 200, code/formula 2048, chart
 4096 for every chart output (a wide table does not fit in 2048).
+`picture_description_params` (Docling `picture_description_api.params`, as
+typed fields) can name the description model and budget and add
+`temperature`, `top_p`, and `seed`; an unset field is not sent. They apply to
+picture descriptions only.
 
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
-retried up to 5 times with exponential backoff starting at 0.1s, then the
-item is skipped with `SKIP_REASON_VLM_ERROR` rather than failing the RPC.
-Every skip carries an explicit reason, and description annotations record the
-model name as provenance.
+retried up to 5 times with exponential backoff starting at 0.1s (or the
+endpoint's `Retry-After`), then the item is skipped with
+`SKIP_REASON_VLM_ERROR` rather than failing the RPC. The per-call timeout
+bounds the whole call, every attempt and every wait between them included: a
+retry that could not start before it passes is not made. A reply larger than
+4 MiB, or a call that does not finish within the per-call timeout, is a skip
+too. Every skip carries an explicit reason, and description
+annotations record the model name as provenance. A cancelled call (client
+cancel, expired deadline, failed RPC) interrupts its VLM calls in flight and
+starts no more.
+
+## VLM endpoint URLs
+
+`ENRICH_VLM_URL`, `EnrichOptions.vlm_endpoint`, and
+`chart_extraction.vlm_endpoint` take either a base URL or a full endpoint
+URL, so Docling's `picture_description_api.url` works as given:
+
+| Given | Requests go to |
+|---|---|
+| `http://vlm:8080` (an origin, or a proxy prefix such as `http://proxy/llama`) | `<url>/v1/chat/completions` |
+| `https://api.example.com/v1`, `http://ovms:8000/v3` (path ends in a version) | `<url>/chat/completions` |
+| `http://localhost:8000/v1/chat/completions`, `http://ovms:8000/v3/chat/completions` | used verbatim |
+| any URL with a query string (Azure `...?api-version=...`) | used verbatim |
+
+## Security
+
+The ports have no authentication, so the service treats every caller as
+untrusted:
+
+- **Per-request endpoints are refused by default.** `vlm_endpoint` and
+  `chart_extraction.vlm_endpoint` make this server send HTTP requests to a
+  URL the caller picks (gRParse fills `vlm_endpoint` from the end user's
+  Docling `picture_description_api.url`). They are `PERMISSION_DENIED` unless
+  the operator sets `ENRICH_ALLOW_REQUEST_ENDPOINT=true` (any http(s) URL:
+  only when every caller may reach whatever this server can reach, cluster
+  services and cloud metadata included) or lists the allowed origins in
+  `ENRICH_VLM_ENDPOINT_ALLOWLIST`, the safer choice. An endpoint on the
+  same origin (scheme, host, port) as `ENRICH_VLM_URL` is always allowed,
+  since it is the operator's own. This mirrors Docling's
+  `enable_remote_services`.
+- **The operator's key stays with the operator's endpoint.**
+  `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`, and only on calls
+  whose request names no endpoint: a per-request endpoint never gets it,
+  even one on the same origin. A caller's
+  `vlm_headers` are sent only to the endpoint that caller named, never to
+  `ENRICH_VLM_URL`, and their values are never logged or echoed.
+- **No response echo.** A failure on a per-request endpoint is reported by
+  HTTP status or failure type only, never with bytes that endpoint sent, so
+  the service cannot be used to read pages from hosts the caller could not
+  reach itself. Failures on `ENRICH_VLM_URL` keep the endpoint's error text.
+- **Bounded memory and work.** The byte cap covers inline documents and
+  crops, the HTTP shim caps bodies before parsing, VLM replies are capped at
+  4 MiB, VLM concurrency is capped process-wide, and a caller cannot raise
+  the per-call timeout above the server's.
+- **The gRParse-to-enrich hop is plaintext gRPC.** `vlm_headers` (usually
+  credentials) cross it in clear text: keep the service on a trusted
+  network, or put TLS in front of it.
+
+### Upgrading: per-request endpoints from gRParse
+
+Earlier releases used any per-request endpoint. gRParse fills those fields
+from its own operator settings, not only from end users: it sends
+`GRPARSE_ENRICH_VLM_ENDPOINT` as `vlm_endpoint` on every request, and a
+chart preset's `url` as `chart_extraction.vlm_endpoint`. After the upgrade,
+a request naming any other origin fails with `PERMISSION_DENIED` and gets no
+enrichment. For each such URL, either:
+
+- point `ENRICH_VLM_URL` at the same origin (always allowed), or
+- list its origin in `ENRICH_VLM_ENDPOINT_ALLOWLIST`, for example
+  `ENRICH_VLM_ENDPOINT_ALLOWLIST=http://vlm:8086,http://chart-model:8087`.
+
+`ENRICH_ALLOW_REQUEST_ENDPOINT=true` also restores the old behaviour, but
+lets every caller aim this server at any host it can reach. If the VLM needs
+`ENRICH_VLM_API_KEY`, leave `GRPARSE_ENRICH_VLM_ENDPOINT` unset so gRParse's
+calls go to `ENRICH_VLM_URL` with the key.
 
 ## Start here (humans and LLMs)
 

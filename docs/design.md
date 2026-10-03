@@ -39,7 +39,12 @@ image bytes from the document and sends crops separately.
 `do_formula_enrichment`), an enum preset per job with a `*_raw` string
 fallback for model names the schema does not know,
 `picture_description_area_threshold`, and the per-request overrides
-`vlm_endpoint`, `concurrency`, `timeout_seconds`. `return_document` asks for
+`vlm_endpoint` (accepted only when the operator allows per-request
+endpoints), `concurrency`, `timeout_seconds` (never above the server's).
+Docling's `picture_description_api` extras ride as typed fields:
+`picture_description_prompt`, `picture_description_params` (model,
+max_tokens, temperature, top_p, seed), and `vlm_headers`, which go only to a
+per-request endpoint. `return_document` asks for
 the patched full document in the trailer. `chart_extraction`
 (`ChartExtractionOptions`) turns on the Docling chart stage: `csv`,
 `summary`, `code` output switches, `natural_language_prompts`, and a
@@ -69,8 +74,9 @@ The binary also exposes the service over HTTP on `ENRICH_HTTP_PORT` (default
 drives the existing `EnrichServiceImpl` through an in-process
 `StreamObserver` harness, playing options, crops, completing chunk,
 half-close exactly as a wire client would. `POST /v1/enrich` buffers the
-events into one `{"events": [...]}` reply (400 / 413 / 500 mapped from
-`INVALID_ARGUMENT` / `RESOURCE_EXHAUSTED` / anything else);
+events into one `{"events": [...]}` reply (400 / 403 / 413 / 500 mapped from
+`INVALID_ARGUMENT` / `PERMISSION_DENIED` / `RESOURCE_EXHAUSTED` / anything
+else; bodies over 4/3 of the byte cap plus 1 MiB are 413 before parsing);
 `POST /v1/enrich/stream` forwards each event as a flushed NDJSON line so HTTP
 callers get the same live per-item stream; `GET /healthz` is a static 200.
 `GetServiceInfo` remains gRPC-only.

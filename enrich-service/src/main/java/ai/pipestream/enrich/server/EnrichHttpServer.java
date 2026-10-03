@@ -42,19 +42,36 @@ import java.util.concurrent.LinkedBlockingQueue;
  * EnrichDocumentResponse event as the stream produces it, with a final
  * {@code {"error":…}} line when the stream fails mid-flight;
  * {@code GET /healthz} is a static 200 "ok".
+ *
+ * <p><b>Body limit.</b> A request body is read into memory and parsed into
+ * several copies, so it is capped before any of that: 4/3 of the service's
+ * byte cap (base64 for crops and bytes fields) plus 1 MiB of JSON
+ * structure. A larger Content-Length is answered 413 without reading the
+ * body; a body without one is read up to the limit and no further.
+ *
+ * <p><b>Disconnects.</b> When an NDJSON client goes away, the next event
+ * write fails and the in-process call is cancelled, so its VLM calls stop.
+ * The buffered endpoint writes nothing until the end, and the JDK server
+ * reports no disconnect before a write, so it runs to completion.
  */
 public final class EnrichHttpServer implements AutoCloseable {
 
   private static final String DONE = "DONE";
+
+  /** JSON structure allowance on top of the base64-expanded byte cap. */
+  private static final long BODY_SLACK_BYTES = 1L << 20;
 
   /** NDJSON needs one line per event, so the compact printer everywhere. */
   private static final JsonFormat.Printer PRINTER =
       JsonFormat.printer().omittingInsignificantWhitespace();
 
   private final HttpServer server;
+  private final int maxBodyBytes;
 
   public EnrichHttpServer(int port, EnrichServiceImpl service, Executor executor)
       throws IOException {
+    long cap = service.maxDocumentBytes();
+    maxBodyBytes = (int) Math.min(Integer.MAX_VALUE - 8, cap + cap / 3 + BODY_SLACK_BYTES);
     server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
     server.createContext("/healthz", EnrichHttpServer::healthz);
     server.createContext("/v1/enrich", exchange -> enrichSync(service, exchange));
@@ -137,6 +154,13 @@ public final class EnrichHttpServer implements AutoCloseable {
    */
   private static final class Harness implements StreamObserver<EnrichDocumentResponse> {
     final BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
+    StreamObserver<EnrichDocumentRequest> requester;
+
+    /** The HTTP client went away: cancel the call as a wire client would. */
+    void cancel() {
+      requester.onError(Status.CANCELLED.withDescription("HTTP client disconnected")
+          .asRuntimeException());
+    }
 
     @Override
     public void onNext(EnrichDocumentResponse event) {
@@ -157,6 +181,7 @@ public final class EnrichHttpServer implements AutoCloseable {
   private static Harness drive(EnrichServiceImpl service, Envelope envelope) {
     Harness harness = new Harness();
     StreamObserver<EnrichDocumentRequest> requester = service.enrichDocument(harness);
+    harness.requester = requester;
     requester.onNext(EnrichDocumentRequest.newBuilder().setOptions(envelope.options()).build());
     // With an inline document in options the service starts immediately, as on
     // the wire; a top-level document goes the chunk route so crops apply and
@@ -184,13 +209,42 @@ public final class EnrichHttpServer implements AutoCloseable {
     }
   }
 
-  private static void enrichSync(EnrichServiceImpl service, HttpExchange exchange)
+  /**
+   * The request body as text, or null after answering 413 when it is over
+   * {@link #maxBodyBytes}. Never reads more than one byte past the limit.
+   */
+  private String readBody(HttpExchange exchange) throws IOException {
+    String declared = exchange.getRequestHeaders().getFirst("Content-Length");
+    if (declared != null) {
+      long length;
+      try {
+        length = Long.parseLong(declared.strip());
+      } catch (NumberFormatException unparseable) {
+        length = -1;
+      }
+      if (length > maxBodyBytes) {
+        sendError(exchange, 413, "request body exceeds the " + maxBodyBytes + "-byte limit");
+        return null;
+      }
+    }
+    byte[] body = exchange.getRequestBody().readNBytes(maxBodyBytes + 1);
+    if (body.length > maxBodyBytes) {
+      sendError(exchange, 413, "request body exceeds the " + maxBodyBytes + "-byte limit");
+      return null;
+    }
+    return new String(body, StandardCharsets.UTF_8);
+  }
+
+  private void enrichSync(EnrichServiceImpl service, HttpExchange exchange)
       throws IOException {
     if (!"POST".equals(exchange.getRequestMethod())) {
       sendError(exchange, 405, "POST only");
       return;
     }
-    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+    String body = readBody(exchange);
+    if (body == null) {
+      return;
+    }
     final Envelope envelope;
     try {
       envelope = parseEnvelope(body);
@@ -223,13 +277,16 @@ public final class EnrichHttpServer implements AutoCloseable {
     sendJson(exchange, 200, json.toString());
   }
 
-  private static void enrichStream(EnrichServiceImpl service, HttpExchange exchange)
+  private void enrichStream(EnrichServiceImpl service, HttpExchange exchange)
       throws IOException {
     if (!"POST".equals(exchange.getRequestMethod())) {
       sendError(exchange, 405, "POST only");
       return;
     }
-    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+    String body = readBody(exchange);
+    if (body == null) {
+      return;
+    }
     final Envelope envelope;
     try {
       envelope = parseEnvelope(body);
@@ -242,13 +299,18 @@ public final class EnrichHttpServer implements AutoCloseable {
     while (true) {
       Object item = take(harness.inbox);
       if (item instanceof EnrichDocumentResponse event) {
-        if (out == null) {
-          exchange.getResponseHeaders().set("Content-Type", "application/x-ndjson");
-          exchange.sendResponseHeaders(200, 0); // chunked: length unknown
-          out = exchange.getResponseBody();
+        try {
+          if (out == null) {
+            exchange.getResponseHeaders().set("Content-Type", "application/x-ndjson");
+            exchange.sendResponseHeaders(200, 0); // chunked: length unknown
+            out = exchange.getResponseBody();
+          }
+          out.write((PRINTER.print(event) + "\n").getBytes(StandardCharsets.UTF_8));
+          out.flush();
+        } catch (IOException disconnected) {
+          harness.cancel();
+          throw disconnected;
         }
-        out.write((PRINTER.print(event) + "\n").getBytes(StandardCharsets.UTF_8));
-        out.flush();
       } else if (item instanceof Throwable error) {
         Status status = Status.fromThrowable(error);
         if (out == null) {
@@ -288,6 +350,7 @@ public final class EnrichHttpServer implements AutoCloseable {
   private static int httpStatus(Status status) {
     return switch (status.getCode()) {
       case INVALID_ARGUMENT -> 400;
+      case PERMISSION_DENIED -> 403;
       case RESOURCE_EXHAUSTED -> 413;
       default -> 500;
     };

@@ -21,16 +21,31 @@ import ai.pipestream.enrich.v1.ItemAnnotation;
 import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.SkipReason;
+import ai.pipestream.enrich.v1.VlmGenerationParams;
+import ai.pipestream.enrich.v1.VlmHeader;
 import ai.pipestream.enrich.vlm.VlmClient;
+import ai.pipestream.enrich.vlm.VlmClient.Header;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmRequest;
+import ai.pipestream.enrich.vlm.VlmEndpoint;
+import io.grpc.Status;
+import java.net.URI;
+import java.net.http.HttpRequest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -41,16 +56,53 @@ import java.util.function.Consumer;
  * then the EnrichComplete trailer. Per-item events are emitted the moment
  * they exist, never buffered into a batch; out-of-order across items is
  * legal. A failed VLM call skips its item and never fails the RPC.
+ *
+ * <p><b>Concurrency.</b> {@code maxConcurrency} is a process-wide cap: one
+ * fair semaphore shared by every request bounds the VLM calls in flight, so
+ * N concurrent documents cannot put N times the cap on the VLM server (and
+ * multiply it again with retries exactly when it pushes back). A request's
+ * own {@code concurrency} is a sub-limit inside that cap.
+ *
+ * <p><b>Endpoints and credentials.</b> {@link EndpointPolicy} decides whether
+ * a request may name its own endpoint, and the operator's key is attached
+ * only to the operator's endpoint. A caller's {@code vlm_headers} go only to
+ * the endpoint the caller named. A failure on a caller-named endpoint is
+ * reported by its safe message, never with bytes that endpoint sent.
+ *
+ * <p><b>Cancellation.</b> {@link Cancellation#cancel()} interrupts every VLM
+ * call the enrichment has in flight and stops the queued ones from starting,
+ * so a client that went away stops costing VLM capacity.
  */
 public final class EnrichmentEngine {
 
+  /** Most vlm_headers one request may carry. */
+  static final int MAX_HEADERS = 32;
+  /** Longest vlm_headers name, in characters. */
+  static final int MAX_HEADER_NAME_CHARS = 256;
+  /** Longest vlm_headers value, in characters. */
+  static final int MAX_HEADER_VALUE_CHARS = 8192;
+
+  /**
+   * Header names a caller may not set: the ones this client sets itself
+   * (Content-Type, the framing headers), the target host, and the hop-by-hop
+   * headers, which describe a connection rather than the request.
+   */
+  private static final Set<String> RESERVED_HEADERS = reservedHeaders();
+
+  private static final System.Logger LOG = System.getLogger(EnrichmentEngine.class.getName());
+
   private final VlmClient.Factory clientFactory;
-  private final String defaultEndpoint;
+  private final EndpointPolicy endpoints;
   private final int defaultConcurrency;
   private final int maxConcurrency;
   private final Duration defaultTimeout;
   private final ExecutorService executor;
+  /** Process-wide VLM call slots, shared by every enrichment. Fair, so a
+   * request that queued first is served first. */
+  private final Semaphore processSlots;
 
+  /** An engine whose only endpoint is {@code defaultEndpoint}: no key, and
+   * per-request endpoints refused. */
   public EnrichmentEngine(
       VlmClient.Factory clientFactory,
       String defaultEndpoint,
@@ -58,12 +110,212 @@ public final class EnrichmentEngine {
       int maxConcurrency,
       Duration defaultTimeout,
       ExecutorService executor) {
+    this(clientFactory, EndpointPolicy.defaultOnly(defaultEndpoint), defaultConcurrency,
+        maxConcurrency, defaultTimeout, executor);
+  }
+
+  /**
+   * An engine that reaches the endpoints {@code endpoints} allows.
+   *
+   * @param endpoints which endpoints requests may reach, and the operator's key
+   * @param defaultConcurrency per-request VLM concurrency when the request
+   *     names none
+   * @param maxConcurrency the process-wide cap on in-flight VLM calls, which
+   *     also bounds each request's concurrency
+   * @param defaultTimeout per-call timeout when the request names none, and
+   *     the ceiling on the one it names
+   */
+  public EnrichmentEngine(
+      VlmClient.Factory clientFactory,
+      EndpointPolicy endpoints,
+      int defaultConcurrency,
+      int maxConcurrency,
+      Duration defaultTimeout,
+      ExecutorService executor) {
     this.clientFactory = clientFactory;
-    this.defaultEndpoint = defaultEndpoint;
+    this.endpoints = endpoints;
     this.defaultConcurrency = defaultConcurrency;
     this.maxConcurrency = maxConcurrency;
     this.defaultTimeout = defaultTimeout;
     this.executor = executor;
+    this.processSlots = new Semaphore(Math.max(1, maxConcurrency), true);
+  }
+
+  /**
+   * Checks {@code options} against this server's endpoint policy and the
+   * rules for headers and generation parameters, before any work starts.
+   * Returns {@link Status#OK}, PERMISSION_DENIED for a per-request endpoint
+   * the operator has not allowed, or INVALID_ARGUMENT. A description never
+   * repeats a header value.
+   */
+  public Status validate(EnrichOptions options) {
+    List<String> requested = requestEndpoints(options);
+    for (String endpoint : requested) {
+      try {
+        VlmEndpoint.completionsUri(endpoint);
+      } catch (IllegalArgumentException unusable) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "per-request VLM endpoint is unusable: " + unusable.getMessage());
+      }
+      if (!endpoints.allowsRequestEndpoint(endpoint)) {
+        return Status.PERMISSION_DENIED.withDescription(
+            "this server does not accept a per-request VLM endpoint for "
+                + VlmEndpoint.origin(endpoint) + " (vlm_endpoint or chart_extraction.vlm_endpoint);"
+                + " its operator allows them with ENRICH_ALLOW_REQUEST_ENDPOINT or"
+                + " ENRICH_VLM_ENDPOINT_ALLOWLIST, and the origin of ENRICH_VLM_URL is"
+                + " always allowed");
+      }
+    }
+    if (options.getVlmHeadersCount() > 0) {
+      if (requested.isEmpty()) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers are sent only to a per-request endpoint (vlm_endpoint or"
+                + " chart_extraction.vlm_endpoint), and none is set");
+      }
+      Status headers = validateHeaders(options.getVlmHeadersList());
+      if (!headers.isOk()) {
+        return headers;
+      }
+    }
+    return options.hasPictureDescriptionParams()
+        ? validateParams(options.getPictureDescriptionParams())
+        : Status.OK;
+  }
+
+  /** The non-empty endpoints a request names for its own calls. */
+  private static List<String> requestEndpoints(EnrichOptions options) {
+    List<String> requested = new ArrayList<>(2);
+    if (!options.getVlmEndpoint().isEmpty()) {
+      requested.add(options.getVlmEndpoint());
+    }
+    if (options.hasChartExtraction() && !options.getChartExtraction().getVlmEndpoint().isEmpty()) {
+      requested.add(options.getChartExtraction().getVlmEndpoint());
+    }
+    return requested;
+  }
+
+  private static Status validateHeaders(List<VlmHeader> headers) {
+    if (headers.size() > MAX_HEADERS) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "vlm_headers carries " + headers.size() + " headers; at most " + MAX_HEADERS
+              + " are allowed");
+    }
+    for (int i = 0; i < headers.size(); i++) {
+      String name = headers.get(i).getName();
+      String value = headers.get(i).getValue();
+      if (name.isEmpty() || name.length() > MAX_HEADER_NAME_CHARS || !isToken(name)) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers[" + i + "] has an invalid header name");
+      }
+      if (RESERVED_HEADERS.contains(name)) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers[" + i + "] sets " + name + ", which this server does not let a caller"
+                + " set");
+      }
+      if (value.length() > MAX_HEADER_VALUE_CHARS || !isHeaderValue(value)
+          || !jdkAccepts(name, value)) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers[" + i + "] (" + name + ") has a value HTTP does not allow, or one"
+                + " longer than " + MAX_HEADER_VALUE_CHARS + " characters");
+      }
+    }
+    return Status.OK;
+  }
+
+  private static Status validateParams(VlmGenerationParams params) {
+    if (params.hasMaxTokens() && params.getMaxTokens() == 0) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "picture_description_params.max_tokens must be positive");
+    }
+    if (params.hasTemperature()
+        && !(Double.isFinite(params.getTemperature()) && params.getTemperature() >= 0.0)) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "picture_description_params.temperature must be a finite, non-negative number");
+    }
+    if (params.hasTopP()
+        && !(Double.isFinite(params.getTopP())
+            && params.getTopP() >= 0.0 && params.getTopP() <= 1.0)) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "picture_description_params.top_p must be between 0 and 1");
+    }
+    return Status.OK;
+  }
+
+  /** An RFC 9110 token: the characters an HTTP field name may use. */
+  private static boolean isToken(String name) {
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      boolean alphanumeric = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+          || (c >= '0' && c <= '9');
+      if (!alphanumeric && "!#$%&'*+-.^_`|~".indexOf(c) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Visible ASCII, space, tab, and obs-text; never CR, LF, NUL, or DEL. */
+  private static boolean isHeaderValue(String value) {
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      if (c != '\t' && (c < 0x20 || c == 0x7f || c > 0xff)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Whether the JDK HttpClient takes this header. Checked up front because
+   * the JDK's own refusal message repeats the value. */
+  private static boolean jdkAccepts(String name, String value) {
+    try {
+      HttpRequest.newBuilder(URI.create("http://localhost/")).header(name, value);
+      return true;
+    } catch (IllegalArgumentException refused) {
+      return false;
+    }
+  }
+
+  private static Set<String> reservedHeaders() {
+    Set<String> reserved = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    reserved.addAll(List.of("content-type", "content-length", "host", "expect", "connection",
+        "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te",
+        "trailer", "transfer-encoding", "upgrade"));
+    return reserved;
+  }
+
+  /**
+   * Stops one enrichment. {@link #cancel()} marks it cancelled and interrupts
+   * every VLM call it has in flight; calls not yet started never start, and
+   * no trailer is emitted. Safe from any thread, any number of times, before
+   * or after the enrichment starts.
+   */
+  public static final class Cancellation {
+    private final Set<Future<?>> inFlight = ConcurrentHashMap.newKeySet();
+    private volatile boolean cancelled;
+
+    public void cancel() {
+      cancelled = true;
+      for (Future<?> call : inFlight) {
+        call.cancel(true);
+      }
+    }
+
+    public boolean isCancelled() {
+      return cancelled;
+    }
+
+    /** Registers a call; one registered after cancel() is cancelled at once. */
+    private void track(Future<?> call) {
+      inFlight.add(call);
+      if (cancelled) {
+        call.cancel(true);
+      }
+    }
+
+    private void forget(Future<?> call) {
+      inFlight.remove(call);
+    }
   }
 
   /**
@@ -77,6 +329,20 @@ public final class EnrichmentEngine {
       Map<String, ItemImage> crops,
       EnrichOptions options,
       Consumer<EnrichDocumentResponse> emit) {
+    enrich(document, crops, options, emit, new Cancellation());
+  }
+
+  /**
+   * {@link #enrich(Document, Map, EnrichOptions, Consumer)} that stops when
+   * {@code cancellation} is cancelled: in-flight VLM calls are interrupted,
+   * queued ones never start, and it returns without a trailer.
+   */
+  public void enrich(
+      Document document,
+      Map<String, ItemImage> crops,
+      EnrichOptions options,
+      Consumer<EnrichDocumentResponse> emit,
+      Cancellation cancellation) {
     Selection selection = ItemSelector.select(document, crops, options);
     emit.accept(event(EnrichStarted.newBuilder()
         .setPictureDescriptions((int) selection.count(Kind.DESCRIPTION))
@@ -95,65 +361,108 @@ public final class EnrichmentEngine {
       emit.accept(EnrichDocumentResponse.newBuilder().setSkipped(preskip).build());
     }
 
-    String endpoint = options.getVlmEndpoint().isEmpty()
-        ? defaultEndpoint
-        : options.getVlmEndpoint();
     // Both fields are uint32 on the wire; Java surfaces values above 2^31 as
     // negative ints. A wrapped concurrency is above the cap, so clamp to it;
-    // a wrapped timeout must be widened back to its unsigned value or the
-    // negative Duration would fail every VLM call.
+    // a wrapped timeout is widened back to its unsigned value. Either way the
+    // server's own timeout is the ceiling: a caller can shorten it, never
+    // lengthen it (it also bounds every Retry-After wait).
     int requestedConcurrency = options.getConcurrency();
     int concurrency = requestedConcurrency == 0
         ? defaultConcurrency
         : requestedConcurrency < 0
             ? maxConcurrency
             : Math.min(requestedConcurrency, maxConcurrency);
-    Duration timeout = options.getTimeoutSeconds() == 0
-        ? defaultTimeout
-        : Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
+    Duration requestedTimeout =
+        Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
+    Duration timeout =
+        options.getTimeoutSeconds() == 0 || requestedTimeout.compareTo(defaultTimeout) > 0
+            ? defaultTimeout
+            : requestedTimeout;
+    List<Header> callerHeaders = options.getVlmHeadersList().stream()
+        .map(header -> new Header(header.getName(), header.getValue()))
+        .toList();
+    List<Header> operatorHeaders = endpoints.defaultApiKey().isEmpty()
+        ? List.of()
+        : List.of(new Header("Authorization", "Bearer " + endpoints.defaultApiKey()));
 
     // A work item may name its own endpoint (chart calls routed to a chart
-    // model); every other item uses the request's. One client per endpoint.
-    List<WorkItem> runnable = new ArrayList<>();
+    // model); every other item uses the request's, then the operator's. One
+    // client per endpoint.
+    List<Call> runnable = new ArrayList<>();
+    Map<String, VlmClient> clients = new HashMap<>();
     for (WorkItem item : selection.work()) {
-      if (endpointFor(item, endpoint).isEmpty()) {
-        skipped.incrementAndGet();
-        emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR,
-            "no VLM endpoint configured (set ENRICH_VLM_URL or EnrichOptions.vlm_endpoint)"));
+      String requested = item.endpoint() != null ? item.endpoint() : options.getVlmEndpoint();
+      boolean callerChosen = !requested.isEmpty();
+      String endpoint = callerChosen ? requested : endpoints.defaultEndpoint();
+      String refusal = null;
+      VlmClient client = null;
+      if (endpoint.isEmpty()) {
+        refusal = "no VLM endpoint configured (set ENRICH_VLM_URL or EnrichOptions.vlm_endpoint)";
+      } else if (callerChosen && !endpoints.allowsRequestEndpoint(endpoint)) {
+        refusal = "per-request VLM endpoints are not allowed on this server";
       } else {
-        runnable.add(item);
+        try {
+          client = clients.computeIfAbsent(endpoint, clientFactory::create);
+        } catch (IllegalArgumentException unusable) {
+          refusal = "VLM endpoint is unusable: " + unusable.getMessage();
+        }
+      }
+      if (refusal != null) {
+        skipped.incrementAndGet();
+        emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR, refusal));
+      } else {
+        runnable.add(new Call(item, client, callerChosen,
+            callerChosen ? callerHeaders : operatorHeaders));
       }
     }
     if (!runnable.isEmpty()) {
-      Map<String, VlmClient> clients = new HashMap<>();
-      for (WorkItem item : runnable) {
-        clients.computeIfAbsent(endpointFor(item, endpoint), clientFactory::create);
-      }
-      Semaphore slots = new Semaphore(Math.max(1, concurrency));
-      CountDownLatch done = new CountDownLatch(runnable.size());
-      for (WorkItem item : runnable) {
-        VlmClient client = clients.get(endpointFor(item, endpoint));
-        executor.execute(() -> {
+      Semaphore requestSlots = new Semaphore(Math.max(1, concurrency));
+      List<Future<?>> calls = new ArrayList<>(runnable.size());
+      for (Call call : runnable) {
+        Future<?> future = executor.submit(() -> {
           try {
-            slots.acquire();
+            requestSlots.acquire();
             try {
-              runItem(client, item, timeout, emit, succeeded, skipped, failed, enriched);
+              processSlots.acquire();
+              try {
+                if (!cancellation.isCancelled()) {
+                  runItem(call, timeout, emit, succeeded, skipped, failed, enriched);
+                }
+              } finally {
+                processSlots.release();
+              }
             } finally {
-              slots.release();
+              requestSlots.release();
             }
           } catch (InterruptedException interrupt) {
             Thread.currentThread().interrupt();
             failed.incrementAndGet();
-          } finally {
-            done.countDown();
           }
         });
+        cancellation.track(future);
+        calls.add(future);
       }
-      try {
-        done.await();
-      } catch (InterruptedException interrupt) {
-        Thread.currentThread().interrupt();
+      for (int i = 0; i < calls.size(); i++) {
+        Future<?> future = calls.get(i);
+        try {
+          future.get();
+        } catch (CancellationException cancelled) {
+          // Cancelled with the RPC: nothing is left to wait for, and no
+          // trailer follows.
+        } catch (ExecutionException escaped) {
+          // An Error (out of memory encoding a crop, a stack overflow) got
+          // past runItem's own handling. The item still gets its event and
+          // its count, so the trailer adds up to EnrichStarted.
+          unexpected(runnable.get(i), escaped.getCause(), emit, failed);
+        } catch (InterruptedException interrupt) {
+          Thread.currentThread().interrupt();
+          cancellation.cancel();
+        }
+        cancellation.forget(future);
       }
+    }
+    if (cancellation.isCancelled()) {
+      return;
     }
 
     EnrichComplete.Builder complete = EnrichComplete.newBuilder()
@@ -166,9 +475,11 @@ public final class EnrichmentEngine {
     emit.accept(event(complete.build()));
   }
 
-  private static String endpointFor(WorkItem item, String requestEndpoint) {
-    return item.endpoint() == null ? requestEndpoint : item.endpoint();
-  }
+  /** A work item bound to its endpoint's client and the headers that go
+   * with it. {@code callerChosen} marks an endpoint the request named:
+   * its failures are reported without anything it sent. */
+  private record Call(WorkItem item, VlmClient client, boolean callerChosen,
+      List<Header> headers) {}
 
   /** A work item paired with the annotation its own VLM call produced. The
    * pairing (not the self_ref) keys patch application, so two items sharing
@@ -176,18 +487,27 @@ public final class EnrichmentEngine {
   private record EnrichedItem(WorkItem item, ItemAnnotation annotation) {}
 
   private static void runItem(
-      VlmClient client,
-      WorkItem item,
+      Call call,
       Duration timeout,
       Consumer<EnrichDocumentResponse> emit,
       AtomicInteger succeeded,
       AtomicInteger skipped,
       AtomicInteger failed,
       ConcurrentLinkedQueue<EnrichedItem> enriched) {
+    WorkItem item = call.item();
     try {
-      String content =
-          client.complete(item.model(), item.prompt(), item.imageDataUri(), item.maxTokens(),
-              timeout);
+      VlmGenerationParams sampling = item.sampling();
+      String content = call.client().complete(new VlmRequest(
+          item.model(),
+          item.prompt(),
+          item.image(),
+          item.maxTokens(),
+          sampling.hasTemperature()
+              ? OptionalDouble.of(sampling.getTemperature()) : OptionalDouble.empty(),
+          sampling.hasTopP() ? OptionalDouble.of(sampling.getTopP()) : OptionalDouble.empty(),
+          sampling.hasSeed() ? OptionalLong.of(sampling.getSeed()) : OptionalLong.empty(),
+          call.headers(),
+          timeout));
       ItemAnnotation.Builder annotation = ItemAnnotation.newBuilder()
           .setSelfRef(item.selfRef())
           .setModel(item.model());
@@ -211,12 +531,25 @@ public final class EnrichmentEngine {
       emit.accept(EnrichDocumentResponse.newBuilder().setAnnotation(built).build());
     } catch (VlmException vlm) {
       skipped.incrementAndGet();
-      emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR, vlm.getMessage()));
+      emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR,
+          call.callerChosen() ? vlm.safeMessage() : vlm.getMessage()));
     } catch (RuntimeException unexpected) {
-      failed.incrementAndGet();
-      emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_UNSPECIFIED,
-          "unexpected failure enriching this item: " + unexpected));
+      unexpected(call, unexpected, emit, failed);
     }
+  }
+
+  /** Counts, logs, and reports a failure no VLM error accounts for. The log
+   * keeps the stack trace; the event names only the type for a caller-chosen
+   * endpoint, whose bytes the message may carry. */
+  private static void unexpected(
+      Call call, Throwable failure, Consumer<EnrichDocumentResponse> emit, AtomicInteger failed) {
+    failed.incrementAndGet();
+    LOG.log(System.Logger.Level.ERROR,
+        "unexpected failure enriching " + call.item().selfRef(), failure);
+    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_UNSPECIFIED,
+        "unexpected failure enriching this item: " + (call.callerChosen()
+            ? failure.getClass().getSimpleName()
+            : failure.toString())));
   }
 
   /** Post-processes one chart output's reply the way Docling's

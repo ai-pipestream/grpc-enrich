@@ -15,8 +15,12 @@ import ai.pipestream.document.v1.Size;
 import ai.pipestream.enrich.engine.ItemSelector;
 import ai.pipestream.enrich.engine.ItemSelector.Selection;
 import ai.pipestream.enrich.v1.EnrichOptions;
+import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.SkipReason;
+import ai.pipestream.enrich.vlm.VlmClient.VlmImage;
+import com.google.protobuf.ByteString;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -245,5 +249,29 @@ class ItemSelectorAdversarialTest {
     Selection selection = ItemSelector.select(document, Map.of(),
         EnrichOptions.newBuilder().setDoChartExtraction(true).build());
     assertThat(selection.work()).isEmpty();
+  }
+
+  @Test
+  void crops_areReferencedNotEncodedAtSelection() {
+    // Selection must not base64 every crop up front: each work item keeps a
+    // reference to its crop's bytes, and encoding waits for its own call.
+    ByteString bytes = ByteString.copyFrom(new byte[64 * 1024]);
+    Map<String, ItemImage> crops = new HashMap<>();
+    Document.Builder document = Document.newBuilder().setName("test");
+    for (int i = 0; i < 3; i++) {
+      document.addPictures(PictureItem.newBuilder()
+          .setSelfRef("#/pictures/" + i)
+          .setLabel(DocItemLabel.DOC_ITEM_LABEL_PICTURE));
+      crops.put("#/pictures/" + i, ItemImage.newBuilder()
+          .setSelfRef("#/pictures/" + i).setMimetype("image/jpeg").setData(bytes).build());
+    }
+    Selection selection = ItemSelector.select(document.build(), crops,
+        EnrichOptions.newBuilder().setDoPictureDescription(true).build());
+
+    assertThat(selection.work()).hasSize(3).allSatisfy(item ->
+        assertThat(item.image()).isInstanceOfSatisfying(VlmImage.Bytes.class, crop -> {
+          assertThat(crop.data()).isSameAs(bytes);
+          assertThat(crop.mimetype()).isEqualTo("image/jpeg");
+        }));
   }
 }

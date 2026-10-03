@@ -26,9 +26,11 @@ option java_package = "ai.pipestream.enrich.v1";
 // events are never buffered into a single batch.
 //
 // Error model: a stream whose first message is not EnrichOptions, or that
-// ends without any document, is INVALID_ARGUMENT. Assembled DocumentChunk
-// bytes above the server's byte cap are RESOURCE_EXHAUSTED. Chunk bytes that
-// do not parse as a Document are INVALID_ARGUMENT. A failed VLM call is NOT
+// ends without any document, is INVALID_ARGUMENT. A document (inline, or
+// assembled from DocumentChunk bytes) plus its ItemImage crops above the
+// server's byte cap is RESOURCE_EXHAUSTED. Chunk bytes that do not parse as a
+// Document are INVALID_ARGUMENT. A per-request VLM endpoint the server's
+// operator has not allowed is PERMISSION_DENIED. A failed VLM call is NOT
 // an RPC error: the item is reported as ItemSkipped with reason
 // SKIP_REASON_VLM_ERROR and the remaining items continue.
 service EnrichService {
@@ -96,13 +98,19 @@ message EnrichOptions {
   // CODE_FORMULA_PRESET_UNSPECIFIED. Passed through to the endpoint.
   string code_formula_preset_raw = 11;
   // Per-request override of the VLM endpoint URL. When empty the server's
-  // configured default (ENRICH_VLM_URL) is used.
+  // configured default (ENRICH_VLM_URL) is used. Accepted only when the
+  // server's operator allows per-request endpoints (ENRICH_ALLOW_REQUEST_ENDPOINT,
+  // or an ENRICH_VLM_ENDPOINT_ALLOWLIST naming this URL's origin); otherwise
+  // the RPC fails with PERMISSION_DENIED. Either a base URL (the server
+  // appends /v1/chat/completions) or a full endpoint URL: one whose path ends
+  // in /chat/completions, or that carries a query string, is used verbatim.
   string vlm_endpoint = 12;
   // Maximum number of VLM calls in flight for this request. Zero uses the
   // server's configured default; values above the server cap are clamped.
   uint32 concurrency = 13;
   // Per-VLM-call timeout in seconds. Zero uses the server's configured
-  // default.
+  // default (ENRICH_VLM_TIMEOUT_SECONDS), which is also the ceiling: larger
+  // values are clamped to it.
   uint32 timeout_seconds = 14;
   // When true, EnrichComplete carries a full copy of the document with the
   // emitted annotations applied. Unary convenience only; the event stream is
@@ -118,6 +126,58 @@ message EnrichOptions {
   // the Docling chart stage: one VLM call per enabled output, each with its
   // own prompt and post-processing, each answered by its own event.
   ChartExtractionOptions chart_extraction = 17;
+  // Prompt for the picture-description calls (Docling
+  // picture_description_api.prompt). Non-empty replaces the preset's fixed
+  // prompt; empty keeps it. Chart, code, and formula prompts are unaffected.
+  string picture_description_prompt = 18;
+  // Generation parameters for the picture-description calls (Docling
+  // picture_description_api.params, as typed fields). Absent keeps the
+  // preset model and the 200-token budget, and leaves sampling to the
+  // endpoint.
+  VlmGenerationParams picture_description_params = 19;
+  // HTTP headers sent on every call to a per-request endpoint (vlm_endpoint
+  // or chart_extraction.vlm_endpoint), for example the caller's own
+  // Authorization for that endpoint (Docling picture_description_api.headers).
+  // Never sent to the server's default endpoint (ENRICH_VLM_URL), never
+  // logged, never echoed. Headers without a per-request endpoint, or with a
+  // name or value HTTP does not allow, are INVALID_ARGUMENT.
+  repeated VlmHeader vlm_headers = 20;
+}
+
+// Typed generation parameters for one job's OpenAI-compatible
+// chat-completions calls: the part of Docling's free-form params dict this
+// service sends. Every field is optional; an unset field is not sent (or
+// keeps the job's default), so the endpoint's own default applies.
+message VlmGenerationParams {
+  // Model name sent as "model". Non-empty overrides the job's preset and
+  // *_raw model name.
+  string model = 1;
+  // Generation cap sent as "max_tokens". Unset keeps the job's budget (200
+  // for picture descriptions); zero is INVALID_ARGUMENT.
+  optional uint32 max_tokens = 2;
+  // Sampling temperature sent as "temperature". Must be finite and not
+  // negative (INVALID_ARGUMENT otherwise).
+  optional double temperature = 3;
+  // Nucleus-sampling probability mass sent as "top_p". Must be between 0
+  // and 1 (INVALID_ARGUMENT otherwise).
+  optional double top_p = 4;
+  // Sampling seed sent as "seed", for repeatable output on endpoints that
+  // support it.
+  optional int64 seed = 5;
+}
+
+// One HTTP request header for the calls to a per-request VLM endpoint.
+message VlmHeader {
+  // Header name, for example "Authorization". Must be an HTTP token; Host,
+  // Content-Type, Content-Length, Expect, and the hop-by-hop names
+  // (Connection, Keep-Alive, Proxy-*, TE, Trailer, Transfer-Encoding,
+  // Upgrade) are INVALID_ARGUMENT.
+  string name = 1;
+  // Header value, typically a credential. Marked debug_redact, so
+  // protobuf's redacting debug printers (DebugFormat in Java, AbslStringify
+  // in C++) print it as [REDACTED]; this service never logs or echoes it.
+  // CR, LF, and other control characters are INVALID_ARGUMENT.
+  string value = 2 [debug_redact = true];
 }
 
 // The Docling chart-extraction stage (ChartExtractionVlmEngineOptions) as
@@ -146,7 +206,9 @@ message ChartExtractionOptions {
   string model = 5;
   // VLM endpoint for the chart calls only. Non-empty overrides
   // EnrichOptions.vlm_endpoint and the server default (ENRICH_VLM_URL), so
-  // charts can go to a chart model while pictures go elsewhere.
+  // charts can go to a chart model while pictures go elsewhere. A
+  // per-request endpoint like EnrichOptions.vlm_endpoint: refused with
+  // PERMISSION_DENIED unless the server's operator allows it.
   string vlm_endpoint = 6;
 }
 
@@ -291,7 +353,9 @@ message ItemSkipped {
   string self_ref = 1;
   // Why the item was skipped.
   SkipReason reason = 2;
-  // Human-readable detail (for example the VLM endpoint's error).
+  // Human-readable detail (for example the VLM endpoint's error). For a
+  // per-request endpoint it names the failure (HTTP status, timeout) but
+  // never carries bytes that endpoint sent.
   string detail = 3;
   // For a chart item, which chart output this skip is about (one chart can
   // produce a table, a summary and code, each skipped on its own).
@@ -393,12 +457,17 @@ message GetServiceInfoResponse {
   string service_version = 1;
   // The wire API version, for example "v1".
   string api_version = 2;
-  // The process-default VLM endpoint (ENRICH_VLM_URL), empty when
-  // unconfigured. Per-request EnrichOptions.vlm_endpoint overrides it.
+  // The origin (scheme://host:port) of the process-default VLM endpoint
+  // (ENRICH_VLM_URL), empty when unconfigured. Userinfo, path, and query are
+  // never reported, so a credential in the configured URL stays private.
+  // Per-request EnrichOptions.vlm_endpoint overrides the endpoint when the
+  // operator allows it.
   string default_vlm_endpoint = 3;
-  // The byte cap on the assembled document (RESOURCE_EXHAUSTED above it).
+  // The byte cap on the document plus its ItemImage crops
+  // (RESOURCE_EXHAUSTED above it).
   uint64 max_document_bytes = 4;
-  // The server-wide cap on concurrent VLM calls per request.
+  // The process-wide cap on concurrent VLM calls, shared by every request;
+  // it also bounds EnrichOptions.concurrency.
   uint32 max_concurrent_vlm_calls = 5;
   // Frontend advertisement for the shared demo shell.
   UiInfo ui = 6;
