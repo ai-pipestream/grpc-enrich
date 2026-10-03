@@ -140,8 +140,9 @@ public final class PublicAddress {
    * again) is what keeps a DNS answer that changes between this check and
    * the connection (DNS rebinding) from reaching a private address.
    *
-   * @throws Refused when {@code host} does not resolve, or any of its
-   *     addresses is not public; the message never names an address
+   * @throws Unresolvable when {@code host} does not resolve
+   * @throws Refused when any of its addresses is not public; the message
+   *     never names an address
    */
   public static InetAddress resolvePublic(String host, Resolver resolver) throws Refused {
     InetAddress literal = literal(host);
@@ -152,26 +153,35 @@ public final class PublicAddress {
       try {
         addresses = resolver.resolve(host);
       } catch (UnknownHostException unknown) {
-        throw new Refused("per-request VLM endpoint host does not resolve");
+        throw new Unresolvable();
       }
     }
     if (addresses == null || addresses.length == 0) {
-      throw new Refused("per-request VLM endpoint host does not resolve");
+      throw new Unresolvable();
     }
     for (InetAddress address : addresses) {
       if (!isPublic(address)) {
         throw new Refused("per-request VLM endpoint resolves to a loopback, private,"
-            + " link-local, or other non-public address, which this server does not call"
-            + " for a caller");
+            + " link-local, or other non-public address (tailnet addresses in 100.64.0.0/10"
+            + " included), which this server does not call for a caller; an operator lets"
+            + " callers use it by listing its origin in ENRICH_VLM_ENDPOINT_ALLOWLIST");
       }
     }
     return addresses[0];
   }
 
   /** A caller-chosen endpoint this server will not connect to. */
-  public static final class Refused extends Exception {
+  public static class Refused extends Exception {
     public Refused(String message) {
       super(message);
+    }
+  }
+
+  /** A caller-chosen endpoint whose host does not resolve: unreachable,
+   * rather than refused by policy. */
+  public static final class Unresolvable extends Refused {
+    public Unresolvable() {
+      super("per-request VLM endpoint host does not resolve");
     }
   }
 }

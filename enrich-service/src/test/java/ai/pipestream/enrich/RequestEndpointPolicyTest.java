@@ -220,7 +220,7 @@ class RequestEndpointPolicyTest {
           .map(EnrichDocumentResponse::getSkipped))
           .singleElement()
           .satisfies(skip -> {
-            assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
+            assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_ENDPOINT_REFUSED);
             assertThat(skip.getDetail()).contains("not allowed");
           });
       assertThat(target.calls()).isZero();

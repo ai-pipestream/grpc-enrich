@@ -393,23 +393,7 @@ public final class EnrichmentEngine {
       emit.accept(EnrichDocumentResponse.newBuilder().setSkipped(preskip).build());
     }
 
-    // Both fields are uint32 on the wire; Java surfaces values above 2^31 as
-    // negative ints. A wrapped concurrency is above the cap, so clamp to it;
-    // a wrapped timeout is widened back to its unsigned value. Either way the
-    // server's own timeout is the ceiling: a caller can shorten it, never
-    // lengthen it (it also bounds every Retry-After wait).
-    int requestedConcurrency = options.getConcurrency();
-    int concurrency = requestedConcurrency == 0
-        ? defaultConcurrency
-        : requestedConcurrency < 0
-            ? maxConcurrency
-            : Math.min(requestedConcurrency, maxConcurrency);
-    Duration requestedTimeout =
-        Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
-    Duration timeout =
-        options.getTimeoutSeconds() == 0 || requestedTimeout.compareTo(defaultTimeout) > 0
-            ? defaultTimeout
-            : requestedTimeout;
+    Duration timeout = effectiveTimeout(options);
     List<Header> callerHeaders = options.getVlmHeadersList().stream()
         .map(header -> new Header(header.getName(), header.getValue()))
         .toList();
@@ -417,97 +401,13 @@ public final class EnrichmentEngine {
         ? List.of()
         : List.of(new Header("Authorization", "Bearer " + endpoints.defaultApiKey()));
 
-    // A work item may name its own endpoint (chart calls routed to a chart
-    // model); every other item uses the request's, then the operator's. One
-    // client per endpoint, and one refusal: a host is resolved once.
-    List<Call> runnable = new ArrayList<>();
+    // One client per endpoint, closed once every call has finished.
     Map<String, VlmClient> clients = new HashMap<>();
-    Map<String, String> refusals = new HashMap<>();
     try {
-      for (WorkItem item : selection.work()) {
-        String requested = item.endpoint() != null ? item.endpoint() : options.getVlmEndpoint();
-        boolean callerChosen = !requested.isEmpty();
-        String endpoint = callerChosen ? requested : endpoints.defaultEndpoint();
-        String refusal = null;
-        VlmClient client = null;
-        if (endpoint.isEmpty()) {
-          refusal = "no VLM endpoint configured (set ENRICH_VLM_URL or EnrichOptions.vlm_endpoint)";
-        } else if (callerChosen && !endpoints.allowsRequestEndpoint(endpoint)) {
-          refusal = "per-request VLM endpoints are not allowed on this server";
-        } else if (refusals.containsKey(endpoint)) {
-          refusal = refusals.get(endpoint);
-        } else {
-          try {
-            client = clients.get(endpoint);
-            if (client == null) {
-              client = callerChosen && endpoints.requiresPublicAddress(endpoint)
-                  ? pinnedClient(endpoint)
-                  : clientFactory.create(endpoint);
-              clients.put(endpoint, client);
-            }
-          } catch (IllegalArgumentException unusable) {
-            refusal = "VLM endpoint is unusable: " + unusable.getMessage();
-          } catch (PublicAddress.Refused notPublic) {
-            refusal = notPublic.getMessage();
-          }
-          if (refusal != null) {
-            refusals.put(endpoint, refusal);
-          }
-        }
-        if (refusal != null) {
-          skipped.incrementAndGet();
-          emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR, refusal));
-        } else {
-          runnable.add(new Call(item, client, callerChosen,
-              callerChosen ? callerHeaders : operatorHeaders));
-        }
-      }
-      if (!runnable.isEmpty()) {
-        Semaphore requestSlots = new Semaphore(Math.max(1, concurrency));
-        List<Future<?>> calls = new ArrayList<>(runnable.size());
-        for (Call call : runnable) {
-          Future<?> future = executor.submit(() -> {
-            try {
-              requestSlots.acquire();
-              try {
-                processSlots.acquire();
-                try {
-                  if (!cancellation.isCancelled()) {
-                    runItem(call, timeout, emit, succeeded, skipped, failed, enriched);
-                  }
-                } finally {
-                  processSlots.release();
-                }
-              } finally {
-                requestSlots.release();
-              }
-            } catch (InterruptedException interrupt) {
-              Thread.currentThread().interrupt();
-              failed.incrementAndGet();
-            }
-          });
-          cancellation.track(future);
-          calls.add(future);
-        }
-        for (int i = 0; i < calls.size(); i++) {
-          Future<?> future = calls.get(i);
-          try {
-            future.get();
-          } catch (CancellationException cancelled) {
-            // Cancelled with the RPC: nothing is left to wait for, and no
-            // trailer follows.
-          } catch (ExecutionException escaped) {
-            // An Error (out of memory encoding a crop, a stack overflow) got
-            // past runItem's own handling. The item still gets its event and
-            // its count, so the trailer adds up to EnrichStarted.
-            unexpected(runnable.get(i), escaped.getCause(), emit, failed);
-          } catch (InterruptedException interrupt) {
-            Thread.currentThread().interrupt();
-            cancellation.cancel();
-          }
-          cancellation.forget(future);
-        }
-      }
+      List<Call> runnable = bindCalls(selection.work(), options.getVlmEndpoint(), callerHeaders,
+          operatorHeaders, clients, emit, skipped);
+      runCalls(runnable, effectiveConcurrency(options), timeout, emit, cancellation,
+          new Tally(succeeded, skipped, failed, enriched));
     } finally {
       clients.values().forEach(VlmClient::close);
     }
@@ -525,6 +425,149 @@ public final class EnrichmentEngine {
     emit.accept(event(complete.build()));
   }
 
+  /** The request's concurrency, within the server's cap. The field is uint32
+   * on the wire; Java surfaces values above 2^31 as negative ints, and a
+   * wrapped value is above the cap, so it is clamped to it. */
+  private int effectiveConcurrency(EnrichOptions options) {
+    int requested = options.getConcurrency();
+    if (requested == 0) {
+      return defaultConcurrency;
+    }
+    return requested < 0 ? maxConcurrency : Math.min(requested, maxConcurrency);
+  }
+
+  /** The request's timeout: uint32 on the wire, so widened back to its
+   * unsigned value. The server's own timeout is the ceiling: a caller can
+   * shorten it, never lengthen it (it also bounds every Retry-After wait). */
+  private Duration effectiveTimeout(EnrichOptions options) {
+    Duration requested = Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
+    return options.getTimeoutSeconds() == 0 || requested.compareTo(defaultTimeout) > 0
+        ? defaultTimeout
+        : requested;
+  }
+
+  /**
+   * Binds each work item to its endpoint's client and headers; an item whose
+   * endpoint is refused or unusable is skipped here, with its event. A work
+   * item may name its own endpoint (chart calls routed to a chart model);
+   * every other item uses the request's, then the operator's. Each endpoint
+   * is bound once, so a host is resolved once.
+   */
+  private List<Call> bindCalls(
+      List<WorkItem> work,
+      String requestEndpoint,
+      List<Header> callerHeaders,
+      List<Header> operatorHeaders,
+      Map<String, VlmClient> clients,
+      Consumer<EnrichDocumentResponse> emit,
+      AtomicInteger skipped) {
+    List<Call> runnable = new ArrayList<>();
+    Map<String, Refusal> refusals = new HashMap<>();
+    for (WorkItem item : work) {
+      String requested = item.endpoint() != null ? item.endpoint() : requestEndpoint;
+      boolean callerChosen = !requested.isEmpty();
+      String endpoint = callerChosen ? requested : endpoints.defaultEndpoint();
+      Refusal refusal = refusals.computeIfAbsent(endpoint,
+          unbound -> bind(unbound, callerChosen, clients));
+      if (refusal != Refusal.NONE) {
+        skipped.incrementAndGet();
+        emit.accept(skippedEvent(item, refusal.reason(), refusal.detail()));
+      } else {
+        runnable.add(new Call(item, clients.get(endpoint), callerChosen,
+            callerChosen ? callerHeaders : operatorHeaders));
+      }
+    }
+    return runnable;
+  }
+
+  /**
+   * Builds the client for {@code endpoint} into {@code clients}, or says why
+   * its items are skipped. A caller endpoint the operator allowed only by
+   * allowing any endpoint gets a client pinned to a checked public address.
+   */
+  private Refusal bind(String endpoint, boolean callerChosen, Map<String, VlmClient> clients) {
+    if (endpoint.isEmpty()) {
+      return new Refusal(SkipReason.SKIP_REASON_VLM_ERROR,
+          "no VLM endpoint configured (set ENRICH_VLM_URL or EnrichOptions.vlm_endpoint)");
+    }
+    if (callerChosen && !endpoints.allowsRequestEndpoint(endpoint)) {
+      return new Refusal(SkipReason.SKIP_REASON_ENDPOINT_REFUSED,
+          "per-request VLM endpoints are not allowed on this server");
+    }
+    try {
+      clients.put(endpoint, callerChosen && endpoints.requiresPublicAddress(endpoint)
+          ? pinnedClient(endpoint)
+          : clientFactory.create(endpoint));
+      return Refusal.NONE;
+    } catch (IllegalArgumentException unusable) {
+      return new Refusal(SkipReason.SKIP_REASON_VLM_ERROR,
+          "VLM endpoint is unusable: " + unusable.getMessage());
+    } catch (PublicAddress.Unresolvable unknown) {
+      return new Refusal(SkipReason.SKIP_REASON_VLM_ERROR, unknown.getMessage());
+    } catch (PublicAddress.Refused notPublic) {
+      return new Refusal(SkipReason.SKIP_REASON_ENDPOINT_REFUSED, notPublic.getMessage());
+    }
+  }
+
+  /**
+   * Runs {@code runnable} on the executor, at most {@code concurrency} at a
+   * time for this request and within the process-wide slots, and waits for
+   * every call. Returns early only through {@code cancellation}.
+   */
+  private void runCalls(
+      List<Call> runnable,
+      int concurrency,
+      Duration timeout,
+      Consumer<EnrichDocumentResponse> emit,
+      Cancellation cancellation,
+      Tally tally) {
+    Semaphore requestSlots = new Semaphore(Math.max(1, concurrency));
+    List<Future<?>> calls = new ArrayList<>(runnable.size());
+    for (Call call : runnable) {
+      Future<?> future = executor.submit(() -> {
+        try {
+          requestSlots.acquire();
+          try {
+            processSlots.acquire();
+            try {
+              if (!cancellation.isCancelled()) {
+                runItem(call, timeout, emit, tally.succeeded(), tally.skipped(), tally.failed(),
+                    tally.enriched());
+              }
+            } finally {
+              processSlots.release();
+            }
+          } finally {
+            requestSlots.release();
+          }
+        } catch (InterruptedException interrupt) {
+          Thread.currentThread().interrupt();
+          tally.failed().incrementAndGet();
+        }
+      });
+      cancellation.track(future);
+      calls.add(future);
+    }
+    for (int i = 0; i < calls.size(); i++) {
+      Future<?> future = calls.get(i);
+      try {
+        future.get();
+      } catch (CancellationException cancelled) {
+        // Cancelled with the RPC: nothing is left to wait for, and no
+        // trailer follows.
+      } catch (ExecutionException escaped) {
+        // An Error (out of memory encoding a crop, a stack overflow) got
+        // past runItem's own handling. The item still gets its event and
+        // its count, so the trailer adds up to EnrichStarted.
+        unexpected(runnable.get(i), escaped.getCause(), emit, tally.failed());
+      } catch (InterruptedException interrupt) {
+        Thread.currentThread().interrupt();
+        cancellation.cancel();
+      }
+      cancellation.forget(future);
+    }
+  }
+
   /**
    * A client for a caller endpoint that may only reach public addresses:
    * its host is resolved once, every address is checked, and the client is
@@ -536,6 +579,15 @@ public final class EnrichmentEngine {
     InetAddress address = PublicAddress.resolvePublic(host, resolver);
     return clientFactory.createPinned(endpoint, address);
   }
+
+  /** Why an endpoint's items are skipped; {@link #NONE} when it is usable. */
+  private record Refusal(SkipReason reason, String detail) {
+    static final Refusal NONE = new Refusal(SkipReason.SKIP_REASON_UNSPECIFIED, "");
+  }
+
+  /** The per-request outcome counts and patches every call adds to. */
+  private record Tally(AtomicInteger succeeded, AtomicInteger skipped, AtomicInteger failed,
+      ConcurrentLinkedQueue<EnrichedItem> enriched) {}
 
   /** A work item bound to its endpoint's client and the headers that go
    * with it. {@code callerChosen} marks an endpoint the request named:

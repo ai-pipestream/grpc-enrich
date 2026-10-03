@@ -13,6 +13,7 @@ import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
 import ai.pipestream.enrich.vlm.PublicAddress;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsExchange;
 import com.sun.net.httpserver.HttpsServer;
@@ -78,7 +79,10 @@ class PinnedEndpointTest {
       int port = Integer.parseInt(target.url().substring(target.url().lastIndexOf(':') + 1));
       for (String endpoint : List.of(target.url(), "http://[::1]:" + port,
           "http://169.254.169.254/latest/meta-data", "http://[fd00:ec2::254]/",
-          "http://[::ffff:127.0.0.1]:" + port, "http://10.0.0.1:8080")) {
+          "http://[::ffff:127.0.0.1]:" + port, "http://10.0.0.1:8080",
+          // Other spellings of loopback and metadata the JDK reads as literals.
+          "http://2130706433:" + port, "http://0:" + port, "http://[::ffff:7f00:1]:" + port,
+          "http://[::ffff:a9fe:a9fe]/", "http://[64:ff9b::a9fe:a9fe]/")) {
         Collected result = enrich.run(describe(1, endpoint));
 
         assertThat(result.error()).as(endpoint).isNotNull();
@@ -102,8 +106,10 @@ class PinnedEndpointTest {
     assertThat(events.stream().filter(EnrichDocumentResponse::hasSkipped).toList())
         .hasSize(2)
         .allSatisfy(event -> {
-          assertThat(event.getSkipped().getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
+          assertThat(event.getSkipped().getReason())
+              .isEqualTo(SkipReason.SKIP_REASON_ENDPOINT_REFUSED);
           assertThat(event.getSkipped().getDetail()).contains("non-public")
+              .contains("ENRICH_VLM_ENDPOINT_ALLOWLIST")
               .doesNotContain("169.254");
         });
     assertThat(clients.pinned).isEmpty();
@@ -122,8 +128,11 @@ class PinnedEndpointTest {
 
     assertThat(events.stream().filter(EnrichDocumentResponse::hasSkipped).toList())
         .singleElement()
-        .satisfies(event -> assertThat(event.getSkipped().getDetail())
-            .contains("does not resolve"));
+        .satisfies(event -> {
+          // Unreachable rather than refused by policy.
+          assertThat(event.getSkipped().getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
+          assertThat(event.getSkipped().getDetail()).contains("does not resolve");
+        });
     assertThat(clients.calls).hasValue(0);
   }
 
@@ -185,6 +194,41 @@ class PinnedEndpointTest {
       }
       assertThat(vlm.recorded()).singleElement().satisfies(request ->
           assertThat(request.header("Host")).containsExactly("vlm.invalid:" + port));
+    }
+  }
+
+  @Test
+  void redirects_areNotFollowed() throws Exception {
+    // A public endpoint answering 302 to an unchecked address must not move
+    // the call there, pinned or not.
+    try (FakeVlmServer target = new FakeVlmServer()) {
+      HttpServer bouncer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+      bouncer.createContext("/", exchange -> {
+        exchange.getRequestBody().readAllBytes();
+        exchange.getResponseHeaders().add("Location", target.url() + "/v1/chat/completions");
+        exchange.sendResponseHeaders(302, -1);
+        exchange.close();
+      });
+      bouncer.start();
+      try {
+        int port = bouncer.getAddress().getPort();
+        List<VlmClient> clients = List.of(
+            OpenAiCompatVlmClient.pinned("http://bounce.invalid:" + port,
+                InetAddress.getLoopbackAddress(), Duration.ofMillis(1), SSLContext.getDefault()),
+            new OpenAiCompatVlmClient("http://127.0.0.1:" + port, Duration.ofMillis(1)));
+        for (VlmClient client : clients) {
+          try {
+            assertThatThrownBy(() -> client.complete("m", "describe", null, 10,
+                Duration.ofSeconds(10)))
+                .isInstanceOf(VlmException.class);
+          } finally {
+            client.close();
+          }
+        }
+      } finally {
+        bouncer.stop(0);
+      }
+      assertThat(target.calls()).isZero();
     }
   }
 

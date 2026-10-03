@@ -101,8 +101,12 @@ public final class OpenAiCompatVlmClient implements VlmClient {
    * enrichment request, so sharing avoids a fresh connection pool (and its
    * selector machinery) per document.
    */
-  private static final HttpClient SHARED_HTTP =
-      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+  private static final HttpClient SHARED_HTTP = HttpClient.newBuilder()
+      .connectTimeout(Duration.ofSeconds(10))
+      // Never: a redirect would let an endpoint send the call to an address
+      // no one checked (a public host answering 302 to cloud metadata).
+      .followRedirects(HttpClient.Redirect.NEVER)
+      .build();
 
   private final URI completionsUri;
   private final HttpClient http;
@@ -207,6 +211,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
     // send the address as :authority).
     HttpClient own = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
+        .followRedirects(HttpClient.Redirect.NEVER)
         .version(HttpClient.Version.HTTP_1_1)
         .sslContext(tls)
         .sslParameters(tlsParameters)

@@ -255,7 +255,13 @@ untrusted:
   it), so DNS rebinding cannot redirect them. Such calls use HTTP/1.1. The
   JVM needs `-Djdk.httpclient.allowRestrictedHeaders=host` for the Host
   header; the server sets it at startup, and without it these calls are
-  refused rather than sent unpinned.
+  refused rather than sent unpinned. A host that resolves to a non-public
+  address skips its items with `SKIP_REASON_ENDPOINT_REFUSED` (a host that
+  does not resolve is `SKIP_REASON_VLM_ERROR`). Tailscale addresses sit in
+  the carrier-grade NAT range (`100.64.0.0/10`) and count as non-public: a
+  VLM reached over a tailnet goes in `ENRICH_VLM_ENDPOINT_ALLOWLIST`.
+  Redirects are never followed, so a public endpoint cannot bounce a call
+  to an address no one checked.
 - **The operator's key stays with the operator's endpoint.**
   `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`, and only on calls
   whose request names no endpoint: a per-request endpoint never gets it,
