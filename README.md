@@ -203,11 +203,13 @@ typed fields) can name the description model and budget and add
 picture descriptions only.
 
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
-retried up to 5 times with exponential backoff starting at 0.1s (a
-`Retry-After` is honored up to the per-call timeout), then the item is
-skipped with `SKIP_REASON_VLM_ERROR` rather than failing the RPC. A reply
-larger than 4 MiB, or one that does not finish within the per-call timeout,
-is a skip too. Every skip carries an explicit reason, and description
+retried up to 5 times with exponential backoff starting at 0.1s (or the
+endpoint's `Retry-After`), then the item is skipped with
+`SKIP_REASON_VLM_ERROR` rather than failing the RPC. The per-call timeout
+bounds the whole call, every attempt and every wait between them included: a
+retry that could not start before it passes is not made. A reply larger than
+4 MiB, or a call that does not finish within the per-call timeout, is a skip
+too. Every skip carries an explicit reason, and description
 annotations record the model name as provenance. A cancelled call (client
 cancel, expired deadline, failed RPC) interrupts its VLM calls in flight and
 starts no more.

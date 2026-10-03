@@ -343,10 +343,10 @@ class ResourceLimitsTest {
   void callerTimeoutCannotLoosenTheRetryAfterClamp() throws Exception {
     try (FakeVlmServer vlm = new FakeVlmServer();
         InProcessEnrich enrich = InProcessEnrich.start(EndpointPolicy.defaultOnly(vlm.url()),
-            4, 16, Duration.ofMillis(200), 64L * 1024 * 1024)) {
+            4, 16, Duration.ofSeconds(2), 64L * 1024 * 1024)) {
       vlm.status = 429;
       vlm.retryAfter = "99999999";
-      // With the caller's 4e9-second timeout as the clamp, the first
+      // With the caller's 4e9-second timeout as the deadline, the first
       // Retry-After would park the worker for three years.
       Collected result = assertTimeoutPreemptively(Duration.ofSeconds(15),
           () -> enrich.run(EnrichOptions.newBuilder()
@@ -359,7 +359,7 @@ class ResourceLimitsTest {
         assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
         assertThat(skip.getDetail()).contains("429");
       });
-      assertThat(vlm.calls()).as("1 try + 5 retries").isEqualTo(6);
+      assertThat(vlm.calls()).as("a Retry-After past the deadline ends the call").isEqualTo(1);
     }
   }
 }

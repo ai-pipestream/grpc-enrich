@@ -33,13 +33,16 @@ import java.util.concurrent.TimeoutException;
  * <p>Retry behavior: up to 5 retries on HTTP 429/500/502/503/504 and on
  * connection-level failures (a starting vLLM endpoint commonly drops
  * connections), with exponential backoff of 0.1s, 0.2s, 0.4s, 0.8s, 1.6s,
- * honoring a {@code Retry-After} header when present (clamped to the
- * per-call timeout, which the engine never lets a caller raise above the
- * server's own, so a hostile or buggy endpoint cannot park a worker for
- * days). Other 4xx, per-request timeouts, oversized bodies, and unparseable
- * 200 bodies are not retried. The timeout bounds each attempt individually,
- * response body included; retries can add up to 5 extra attempts plus ~3.1s
- * of backoff on top of one timed-out attempt.
+ * honoring a {@code Retry-After} header when present. Other 4xx, per-request
+ * timeouts, oversized bodies, and unparseable 200 bodies are not retried.
+ *
+ * <p><b>One deadline per call.</b> The per-call timeout (which the engine
+ * never lets a caller raise above the server's own) bounds the whole call:
+ * every attempt, response body included, and every wait between attempts.
+ * Each attempt gets only the time remaining, and a wait that would reach the
+ * deadline ends the call with the last failure instead, so a hostile or
+ * buggy endpoint answering 429 with a long {@code Retry-After} cannot hold a
+ * process-wide VLM slot for more than one timeout.
  *
  * <p><b>Bounded replies.</b> A reply is read into memory up to
  * {@link #MAX_RESPONSE_BYTES} (a 4096-token answer is a few tens of KiB) and
@@ -88,32 +91,54 @@ public final class OpenAiCompatVlmClient implements VlmClient {
   @Override
   public String complete(VlmRequest call) throws VlmException {
     HttpRequest request = buildRequest(call);
+    // Differences of nanoTime stay correct across overflow, so even a
+    // Long.MAX_VALUE budget needs no special case.
+    long deadline = System.nanoTime() + nanos(call.timeout());
     for (int attempt = 0; ; attempt++) {
       final HttpResponse<byte[]> response;
       try {
-        response = send(request, call.timeout());
+        response = send(request, remaining(deadline));
       } catch (IOException failure) {
-        if (attempt < MAX_RETRIES && isRetryable(failure)) {
-          sleep(backoff(attempt));
-          continue;
-        }
         // The JDK's message can quote the response (a malformed status line
         // is repeated verbatim), so only the exception type is safe to report.
-        throw new VlmException(
+        VlmException failed = new VlmException(
             "VLM endpoint call failed (" + failure.getClass().getSimpleName() + ")",
             failure.getMessage(), failure);
+        if (attempt < MAX_RETRIES && isRetryable(failure)) {
+          waitToRetry(backoff(attempt), deadline, failed);
+          continue;
+        }
+        throw failed;
       }
       String body = new String(response.body(), StandardCharsets.UTF_8);
       if (response.statusCode() != 200) {
+        VlmException failed = new VlmException(
+            "VLM endpoint answered HTTP " + response.statusCode(), snippet(body), null);
         if (attempt < MAX_RETRIES && RETRYABLE_STATUSES.contains(response.statusCode())) {
-          sleep(retryWait(response, attempt, call.timeout()));
+          waitToRetry(retryWait(response, attempt), deadline, failed);
           continue;
         }
-        throw new VlmException(
-            "VLM endpoint answered HTTP " + response.statusCode(), snippet(body), null);
+        throw failed;
       }
       return extractContent(body);
     }
+  }
+
+  /** The time left before {@code deadline}, a {@link System#nanoTime()} value;
+   * zero or negative once it has passed. */
+  private static Duration remaining(long deadline) {
+    return Duration.ofNanos(deadline - System.nanoTime());
+  }
+
+  /** Sleeps {@code wait} before the next attempt, or throws {@code failure}
+   * when the call's deadline would pass first: an attempt with no time left
+   * could only time out. */
+  private static void waitToRetry(Duration wait, long deadline, VlmException failure)
+      throws VlmException {
+    if (wait.compareTo(remaining(deadline)) >= 0) {
+      throw failure;
+    }
+    sleep(wait);
   }
 
   /**
@@ -195,15 +220,13 @@ public final class OpenAiCompatVlmClient implements VlmClient {
     return Duration.ofMillis(baseBackoff.toMillis() << attempt);
   }
 
-  /** The wait before the next attempt: Retry-After when present and sane,
-   * else exponential backoff. Retry-After is clamped to the per-call timeout
-   * (a negative value is ignored): a hostile or buggy endpoint must not be
-   * able to park a worker thread for days by answering 429 with a huge
-   * Retry-After. */
-  private Duration retryWait(HttpResponse<?> response, int attempt, Duration timeout) {
-    Duration wait = retryAfter(response).filter(delay -> !delay.isNegative())
+  /** The wait before the next attempt: Retry-After when present and not
+   * negative, else exponential backoff. The call's deadline bounds it (see
+   * {@link #waitToRetry}), so a huge Retry-After ends the call rather than
+   * parking a worker thread for days. */
+  private Duration retryWait(HttpResponse<?> response, int attempt) {
+    return retryAfter(response).filter(delay -> !delay.isNegative())
         .orElse(backoff(attempt));
-    return wait.compareTo(timeout) > 0 ? timeout : wait;
   }
 
   private static Optional<Duration> retryAfter(HttpResponse<?> response) {

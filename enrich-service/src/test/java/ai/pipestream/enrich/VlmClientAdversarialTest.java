@@ -227,6 +227,27 @@ class VlmClientAdversarialTest {
   }
 
   @Test
+  void retries_shareTheCallsOneDeadline() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      vlm.retryAfter = "2";
+      vlm.status = 503;
+      OpenAiCompatVlmClient client =
+          new OpenAiCompatVlmClient(vlm.url(), Duration.ofMillis(1));
+      // Each 2s wait is under the 3s timeout, so a timeout that bounded only
+      // each attempt and each wait would let this call run 6 attempts and
+      // 10s of waits. One deadline for the whole call allows one wait.
+      long start = System.nanoTime();
+      VlmException error = catchThrowableOfType(VlmException.class,
+          () -> client.complete("m", "p", null, 10, Duration.ofSeconds(3)));
+      Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
+
+      assertThat(error.getMessage()).contains("503");
+      assertThat(elapsed).isLessThan(Duration.ofSeconds(6));
+      assertThat(vlm.calls.get()).isBetween(1, 2);
+    }
+  }
+
+  @Test
   void retryAfterHonored_whenReasonable() throws Exception {
     try (RawVlmServer vlm = new RawVlmServer()) {
       vlm.retryAfter = "0";
