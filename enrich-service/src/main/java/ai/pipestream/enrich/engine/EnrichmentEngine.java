@@ -89,6 +89,8 @@ public final class EnrichmentEngine {
    */
   private static final Set<String> RESERVED_HEADERS = reservedHeaders();
 
+  private static final System.Logger LOG = System.getLogger(EnrichmentEngine.class.getName());
+
   private final VlmClient.Factory clientFactory;
   private final EndpointPolicy endpoints;
   private final int defaultConcurrency;
@@ -439,12 +441,18 @@ public final class EnrichmentEngine {
         cancellation.track(future);
         calls.add(future);
       }
-      for (Future<?> future : calls) {
+      for (int i = 0; i < calls.size(); i++) {
+        Future<?> future = calls.get(i);
         try {
           future.get();
-        } catch (CancellationException | ExecutionException ended) {
-          // Cancelled with the RPC, or failed past runItem's own handling;
-          // either way nothing is left to wait for.
+        } catch (CancellationException cancelled) {
+          // Cancelled with the RPC: nothing is left to wait for, and no
+          // trailer follows.
+        } catch (ExecutionException escaped) {
+          // An Error (out of memory encoding a crop, a stack overflow) got
+          // past runItem's own handling. The item still gets its event and
+          // its count, so the trailer adds up to EnrichStarted.
+          unexpected(runnable.get(i), escaped.getCause(), emit, failed);
         } catch (InterruptedException interrupt) {
           Thread.currentThread().interrupt();
           cancellation.cancel();
@@ -525,12 +533,22 @@ public final class EnrichmentEngine {
       emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR,
           call.callerChosen() ? vlm.safeMessage() : vlm.getMessage()));
     } catch (RuntimeException unexpected) {
-      failed.incrementAndGet();
-      emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_UNSPECIFIED,
-          "unexpected failure enriching this item: " + (call.callerChosen()
-              ? unexpected.getClass().getSimpleName()
-              : unexpected.toString())));
+      unexpected(call, unexpected, emit, failed);
     }
+  }
+
+  /** Counts, logs, and reports a failure no VLM error accounts for. The log
+   * keeps the stack trace; the event names only the type for a caller-chosen
+   * endpoint, whose bytes the message may carry. */
+  private static void unexpected(
+      Call call, Throwable failure, Consumer<EnrichDocumentResponse> emit, AtomicInteger failed) {
+    failed.incrementAndGet();
+    LOG.log(System.Logger.Level.ERROR,
+        "unexpected failure enriching " + call.item().selfRef(), failure);
+    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_UNSPECIFIED,
+        "unexpected failure enriching this item: " + (call.callerChosen()
+            ? failure.getClass().getSimpleName()
+            : failure.toString())));
   }
 
   /** Post-processes one chart output's reply the way Docling's

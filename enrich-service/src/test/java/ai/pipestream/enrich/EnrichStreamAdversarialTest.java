@@ -6,6 +6,7 @@ import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.document.v1.ImageRef;
 import ai.pipestream.document.v1.PictureItem;
+import ai.pipestream.enrich.engine.EndpointPolicy;
 import ai.pipestream.enrich.engine.EnrichmentEngine;
 import ai.pipestream.enrich.server.EnrichServiceImpl;
 import ai.pipestream.enrich.v1.DocumentChunk;
@@ -15,7 +16,9 @@ import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.v1.EnrichServiceGrpc;
 import ai.pipestream.enrich.v1.ItemAnnotation;
 import ai.pipestream.enrich.v1.ItemSkipped;
+import ai.pipestream.enrich.v1.SkipReason;
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
+import ai.pipestream.enrich.vlm.VlmClient;
 import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -242,6 +245,38 @@ class EnrichStreamAdversarialTest {
           .isEqualTo(ai.pipestream.enrich.v1.SkipReason.SKIP_REASON_VLM_ERROR);
       assertThat(complete(result).getComplete().getSkipped()).isEqualTo(1);
       never.countDown();
+    }
+  }
+
+  @Test
+  void errorPastTheVlmClient_isCountedAndReported() throws Exception {
+    AtomicInteger calls = new AtomicInteger();
+    VlmClient.Factory clients = endpoint -> request -> {
+      if (calls.incrementAndGet() == 2) {
+        throw new OutOfMemoryError("simulated: encoding a crop");
+      }
+      return "a picture";
+    };
+    try (InProcessEnrich enrich = InProcessEnrich.start(clients,
+        EndpointPolicy.defaultOnly("http://vlm.invalid"), 1, 16, Duration.ofSeconds(10),
+        64L * 1024 * 1024)) {
+      InProcessEnrich.Collected result = enrich.run(EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setConcurrency(1)
+          .setDocument(documentWithPictures(3))
+          .build());
+
+      assertThat(result.error()).isNull();
+      assertThat(result.completed()).isTrue();
+      assertThat(result.events().get(0).getStarted().getPictureDescriptions()).isEqualTo(3);
+      assertThat(result.annotations()).hasSize(2);
+      assertThat(result.skips()).singleElement().satisfies(skip -> {
+        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_UNSPECIFIED);
+        assertThat(skip.getDetail()).contains("OutOfMemoryError");
+      });
+      assertThat(result.complete().getSucceeded()).isEqualTo(2);
+      assertThat(result.complete().getSkipped()).isZero();
+      assertThat(result.complete().getFailed()).isEqualTo(1);
     }
   }
 
