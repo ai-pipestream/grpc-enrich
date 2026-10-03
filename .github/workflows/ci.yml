@@ -1,0 +1,42 @@
+# CI gates for grpc-enrich: the same commands README.md documents (and the
+# image build runs), so a red pull request shows here before it can break an
+# image publish from main.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: buf lint
+        run: buf lint
+      # Contract evolution is guarded against main: changes must be additive.
+      - name: buf breaking
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin main --depth 1
+          buf breaking --against '.git#ref=origin/main'
+
+  gradle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+      - name: build and test
+        run: ./gradlew --no-daemon build

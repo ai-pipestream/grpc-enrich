@@ -35,10 +35,18 @@ jobs:
           password: ${{ secrets.DOCKER_TOKEN }}
       - name: Compute tags
         id: tags
+        # The version arrives through the environment, never interpolated
+        # into the script, and must look like a tag before it is used.
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           svc="docker.io/pipestreamai/grpc-enrich:latest"
-          if [ -n "${{ inputs.version }}" ]; then
-            svc="$svc,docker.io/pipestreamai/grpc-enrich:${{ inputs.version }}"
+          if [ -n "$VERSION" ]; then
+            if ! [[ "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+              echo "version input is not a valid image tag" >&2
+              exit 1
+            fi
+            svc="$svc,docker.io/pipestreamai/grpc-enrich:$VERSION"
           fi
           echo "svc=$svc" >> "$GITHUB_OUTPUT"
       - name: Build and push the service image
