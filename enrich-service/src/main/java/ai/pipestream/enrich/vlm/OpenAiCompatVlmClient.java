@@ -96,7 +96,11 @@ public final class OpenAiCompatVlmClient implements VlmClient {
           sleep(backoff(attempt));
           continue;
         }
-        throw new VlmException("VLM endpoint call failed: " + failure.getMessage(), failure);
+        // The JDK's message can quote the response (a malformed status line
+        // is repeated verbatim), so only the exception type is safe to report.
+        throw new VlmException(
+            "VLM endpoint call failed (" + failure.getClass().getSimpleName() + ")",
+            failure.getMessage(), failure);
       }
       String body = new String(response.body(), StandardCharsets.UTF_8);
       if (response.statusCode() != 200) {
@@ -105,7 +109,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
           continue;
         }
         throw new VlmException(
-            "VLM endpoint answered HTTP " + response.statusCode() + ": " + snippet(body));
+            "VLM endpoint answered HTTP " + response.statusCode(), snippet(body), null);
       }
       return extractContent(body);
     }
@@ -162,7 +166,9 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       if (cause instanceof IOException io) {
         throw io;
       }
-      throw new VlmException("VLM endpoint call failed: " + cause.getMessage(), cause);
+      throw new VlmException(
+          "VLM endpoint call failed (" + cause.getClass().getSimpleName() + ")",
+          cause.getMessage(), cause);
     }
   }
 
@@ -273,10 +279,10 @@ public final class OpenAiCompatVlmClient implements VlmClient {
     try {
       root = Json.asObject(Json.parse(body));
     } catch (IllegalArgumentException bad) {
-      throw new VlmException("unparseable VLM response: " + snippet(body), bad);
+      throw new VlmException("unparseable VLM response", snippet(body), bad);
     }
     if (root.containsKey("error")) {
-      throw new VlmException("VLM endpoint returned an error: " + snippet(body));
+      throw new VlmException("VLM endpoint returned an error", snippet(body), null);
     }
     try {
       List<Object> choices = Json.asArray(root.get("choices"));
@@ -284,7 +290,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       Map<String, Object> message = Json.asObject(first.get("message"));
       return Json.asString(message.get("content"));
     } catch (RuntimeException shape) {
-      throw new VlmException("VLM response had no choices[0].message.content: " + snippet(body),
+      throw new VlmException("VLM response had no choices[0].message.content", snippet(body),
           shape);
     }
   }

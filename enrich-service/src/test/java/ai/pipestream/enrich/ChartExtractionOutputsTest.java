@@ -8,6 +8,7 @@ import ai.pipestream.document.v1.Document;
 import ai.pipestream.document.v1.ImageRef;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.Size;
+import ai.pipestream.enrich.engine.EndpointPolicy;
 import ai.pipestream.enrich.engine.EnrichmentEngine;
 import ai.pipestream.enrich.server.EnrichServiceImpl;
 import ai.pipestream.enrich.v1.ChartExtractionOptions;
@@ -32,6 +33,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -95,10 +97,16 @@ class ChartExtractionOutputsTest {
 
   private EnrichServiceGrpc.EnrichServiceStub startService(String defaultEndpoint)
       throws Exception {
+    return startService(EndpointPolicy.defaultOnly(defaultEndpoint));
+  }
+
+  private EnrichServiceGrpc.EnrichServiceStub startService(EndpointPolicy endpoints)
+      throws Exception {
+    String defaultEndpoint = endpoints.defaultEndpoint();
     String name = InProcessServerBuilder.generateName();
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     EnrichmentEngine engine = new EnrichmentEngine(
-        endpoint -> new OpenAiCompatVlmClient(endpoint, Duration.ofMillis(5)), defaultEndpoint,
+        endpoint -> new OpenAiCompatVlmClient(endpoint, Duration.ofMillis(5)), endpoints,
         4, 16, Duration.ofSeconds(10), executor);
     EnrichServiceImpl service =
         new EnrichServiceImpl(64L * 1024 * 1024, engine, executor, defaultEndpoint, 16);
@@ -309,7 +317,11 @@ class ChartExtractionOutputsTest {
           .addPictures(chart("#/pictures/0"))
           .addPictures(picture("#/pictures/1"))
           .build();
-      Collected result = run(startService(general.url()), chartOptions(
+      // A chart endpoint is a per-request endpoint: the operator must allow
+      // it (here by allowlisting its origin).
+      EndpointPolicy allowChartModel = new EndpointPolicy(
+          general.url(), "", false, Set.of(chartModel.url()));
+      Collected result = run(startService(allowChartModel), chartOptions(
           ChartExtractionOptions.newBuilder()
               .setSummary(true)
               .setVlmEndpoint(chartModel.url())
@@ -322,6 +334,21 @@ class ChartExtractionOutputsTest {
           .satisfies(request -> assertThat(request.prompt())
               .isEqualTo("Describe this image in a few sentences."));
       assertThat(result.annotations()).hasSize(3);
+    }
+  }
+
+  @Test
+  void chartEndpoint_refusedUnlessTheOperatorAllowsIt() throws Exception {
+    try (FakeVlmServer general = new FakeVlmServer();
+        FakeVlmServer chartModel = new FakeVlmServer()) {
+      Collected result = run(startService(general.url()), chartOptions(
+          ChartExtractionOptions.newBuilder().setVlmEndpoint(chartModel.url()).build(),
+          oneChart()).build());
+
+      assertThat(result.error()).isNotNull();
+      assertThat(result.error().getStatus().getCode()).isEqualTo(Status.Code.PERMISSION_DENIED);
+      assertThat(chartModel.requests).isEmpty();
+      assertThat(general.requests).isEmpty();
     }
   }
 

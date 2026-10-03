@@ -11,6 +11,7 @@ import ai.pipestream.enrich.v1.GetServiceInfoRequest;
 import ai.pipestream.enrich.v1.GetServiceInfoResponse;
 import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.UiInfo;
+import ai.pipestream.enrich.vlm.VlmEndpoint;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
@@ -26,8 +27,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * immediately -- events flow before the client has finished sending. When the
  * document arrives as DocumentChunk messages, enrichment starts on the chunk
  * marked complete (crops must precede it). RPC-level failures are
- * INVALID_ARGUMENT / RESOURCE_EXHAUSTED; a failed VLM call is an ItemSkipped
- * event, never an RPC error.
+ * INVALID_ARGUMENT / RESOURCE_EXHAUSTED / PERMISSION_DENIED; a failed VLM
+ * call is an ItemSkipped event, never an RPC error.
  */
 public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImplBase {
 
@@ -94,6 +95,11 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
             // Docling's ChartExtractionVlmEngineOptions validator, same rule.
             fail(Status.INVALID_ARGUMENT, "chart_extraction enables no output: at least one of "
                 + "csv, summary, or code must be true");
+            return;
+          }
+          Status refusal = engine.validate(options);
+          if (!refusal.isOk()) {
+            fail(refusal, refusal.getDescription());
             return;
           }
           if (options.hasDocument()) {
@@ -202,7 +208,7 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
     responseObserver.onNext(GetServiceInfoResponse.newBuilder()
         .setServiceVersion(SERVICE_VERSION)
         .setApiVersion(API_VERSION)
-        .setDefaultVlmEndpoint(defaultEndpoint)
+        .setDefaultVlmEndpoint(VlmEndpoint.origin(defaultEndpoint))
         .setMaxDocumentBytes(maxDocumentBytes)
         .setMaxConcurrentVlmCalls(maxConcurrentVlmCalls)
         .setUi(UI_INFO)

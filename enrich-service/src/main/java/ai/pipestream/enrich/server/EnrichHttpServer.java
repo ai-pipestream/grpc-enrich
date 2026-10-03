@@ -288,6 +288,7 @@ public final class EnrichHttpServer implements AutoCloseable {
   private static int httpStatus(Status status) {
     return switch (status.getCode()) {
       case INVALID_ARGUMENT -> 400;
+      case PERMISSION_DENIED -> 403;
       case RESOURCE_EXHAUSTED -> 413;
       default -> 500;
     };

@@ -7,8 +7,9 @@ import ai.pipestream.enrich.vlm.VlmEndpoint;
 import org.junit.jupiter.api.Test;
 
 /**
- * Where a configured VLM URL sends its requests: a base URL gets the
- * chat-completions path, a Docling-style full URL is used verbatim.
+ * Where a configured VLM URL sends its requests (a base URL gets the
+ * chat-completions path, a Docling-style full URL is used verbatim), and the
+ * origin-only form that may leave the process.
  */
 class VlmEndpointTest {
 
@@ -59,5 +60,16 @@ class VlmEndpointTest {
           .isInstanceOf(IllegalArgumentException.class)
           .satisfies(error -> assertThat(error.getMessage()).doesNotContain(bad));
     }
+  }
+
+  @Test
+  void origin_dropsUserinfoPathQueryAndDefaultPorts() {
+    assertThat(VlmEndpoint.origin("https://user:secret@VLM.Internal:8443/v1/x?api_key=k#f"))
+        .isEqualTo("https://vlm.internal:8443");
+    assertThat(VlmEndpoint.origin("http://vlm:80/v1")).isEqualTo("http://vlm");
+    assertThat(VlmEndpoint.origin("https://vlm:443")).isEqualTo("https://vlm");
+    assertThat(VlmEndpoint.origin("http://[::1]:8080/")).isEqualTo("http://[::1]:8080");
+    assertThat(VlmEndpoint.origin("")).isEmpty();
+    assertThat(VlmEndpoint.origin("file:///etc/passwd")).isEmpty();
   }
 }

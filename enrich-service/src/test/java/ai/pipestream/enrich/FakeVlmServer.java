@@ -18,12 +18,22 @@ import java.util.function.Function;
  * what content it returns (optionally per request), whether it gates
  * responses on a latch (to prove streaming), or what status it answers with
  * (fixed or per 1-based call index). Records every request so tests can
- * assert the model name, that image bytes rode along, and the attempt count.
+ * assert the model name, that image bytes rode along, the headers, and the
+ * attempt count.
  */
 final class FakeVlmServer implements AutoCloseable {
 
   record RecordedRequest(String model, boolean hasImage, int maxTokens, String prompt,
-      String body) {}
+      String body, Map<String, List<String>> headers) {
+
+    /** The values of one request header, matched case-insensitively. */
+    List<String> header(String name) {
+      return headers.entrySet().stream()
+          .filter(entry -> entry.getKey().equalsIgnoreCase(name))
+          .flatMap(entry -> entry.getValue().stream())
+          .toList();
+    }
+  }
 
   private final HttpServer server;
   private final java.util.concurrent.ExecutorService executor =
@@ -41,6 +51,11 @@ final class FakeVlmServer implements AutoCloseable {
   /** Per-call status override (1-based call index → HTTP status); defaults to
    * {@link #status} so transient failures can be scripted. */
   Function<Integer, Integer> statusForCall = call -> status;
+  /** The body sent with a non-200 status. */
+  volatile String errorBody = "{\"error\":{\"message\":\"model unavailable\"}}";
+  /** When non-null, the exact body of every 200 reply, instead of a
+   * chat-completions envelope around the responder's content. */
+  volatile String rawOkBody;
 
   FakeVlmServer() {
     try {
@@ -51,7 +66,7 @@ final class FakeVlmServer implements AutoCloseable {
     server.createContext("/v1/chat/completions", exchange -> {
       String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
       int call = callCount.incrementAndGet();
-      record(body);
+      record(body, Map.copyOf(exchange.getRequestHeaders()));
       CountDownLatch gate = gates.get(call);
       if (gate != null) {
         try {
@@ -63,7 +78,9 @@ final class FakeVlmServer implements AutoCloseable {
       byte[] response;
       int code = statusForCall.apply(call);
       if (code != 200) {
-        response = "{\"error\":{\"message\":\"model unavailable\"}}".getBytes(StandardCharsets.UTF_8);
+        response = errorBody.getBytes(StandardCharsets.UTF_8);
+      } else if (rawOkBody != null) {
+        response = rawOkBody.getBytes(StandardCharsets.UTF_8);
       } else {
         response = ("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":"
                 + Json.quote(responder.apply(body)) + "}}]}")
@@ -78,7 +95,7 @@ final class FakeVlmServer implements AutoCloseable {
     server.start();
   }
 
-  private synchronized void record(String body) {
+  private synchronized void record(String body, Map<String, List<String>> headers) {
     String model = "";
     boolean hasImage = false;
     int maxTokens = 0;
@@ -102,7 +119,17 @@ final class FakeVlmServer implements AutoCloseable {
     } catch (RuntimeException ignored) {
       // The record is diagnostic; a parse failure must not fail the test here.
     }
-    requests.add(new RecordedRequest(model, hasImage, maxTokens, prompt, body));
+    requests.add(new RecordedRequest(model, hasImage, maxTokens, prompt, body, headers));
+  }
+
+  /** Requests received so far, safe to read from any thread. */
+  int calls() {
+    return callCount.get();
+  }
+
+  /** A snapshot of the recorded requests, safe to read from any thread. */
+  synchronized List<RecordedRequest> recorded() {
+    return List.copyOf(requests);
   }
 
   String url() {

@@ -389,6 +389,20 @@ class VlmClientAdversarialTest {
   }
 
   @Test
+  void safeMessage_leavesOutWhatTheEndpointSent() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      vlm.status = 403;
+      vlm.body = "<html>internal admin console token=abc123</html>";
+      OpenAiCompatVlmClient client = new OpenAiCompatVlmClient(vlm.url(), Duration.ofMillis(1));
+      VlmException error = catchThrowableOfType(VlmException.class,
+          () -> client.complete("m", "p", null, 10, Duration.ofSeconds(5)));
+      assertThat(error.getMessage()).contains("HTTP 403").contains("admin console");
+      assertThat(error.safeMessage()).contains("HTTP 403").doesNotContain("admin")
+          .doesNotContain("abc123");
+    }
+  }
+
+  @Test
   void redirect_isAnErrorNotFollowed() throws Exception {
     try (RawVlmServer vlm = new RawVlmServer()) {
       // The client never follows redirects (HttpClient.Redirect.NEVER): a

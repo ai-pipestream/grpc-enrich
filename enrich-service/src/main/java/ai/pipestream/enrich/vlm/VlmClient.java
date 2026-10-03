@@ -94,14 +94,40 @@ public interface VlmClient {
     }
   }
 
-  /** A failed VLM call. Always an item-level failure, never an RPC failure. */
+  /**
+   * A failed VLM call. Always an item-level failure, never an RPC failure.
+   *
+   * <p><b>Safe message.</b> {@link #getMessage()} may quote what the endpoint
+   * sent (a body snippet, a transport error that repeats a malformed status
+   * line). {@link #safeMessage()} leaves that out; it is what a failure of a
+   * caller-chosen endpoint may report back, so the service cannot be used to
+   * read responses from hosts the caller could not reach itself.
+   */
   final class VlmException extends Exception {
+    private final String safeMessage;
+
     public VlmException(String message) {
-      super(message);
+      this(message, (Throwable) null);
     }
 
     public VlmException(String message, Throwable cause) {
       super(message, cause);
+      this.safeMessage = message;
+    }
+
+    /**
+     * A failure whose full message adds {@code endpointText}, text that came
+     * from the endpoint, to {@code safeMessage}.
+     */
+    public VlmException(String safeMessage, String endpointText, Throwable cause) {
+      super(endpointText == null || endpointText.isEmpty()
+          ? safeMessage : safeMessage + ": " + endpointText, cause);
+      this.safeMessage = safeMessage;
+    }
+
+    /** The message without anything the endpoint sent. */
+    public String safeMessage() {
+      return safeMessage;
     }
   }
 

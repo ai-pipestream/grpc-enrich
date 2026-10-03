@@ -28,9 +28,10 @@ option java_package = "ai.pipestream.enrich.v1";
 // Error model: a stream whose first message is not EnrichOptions, or that
 // ends without any document, is INVALID_ARGUMENT. Assembled DocumentChunk
 // bytes above the server's byte cap are RESOURCE_EXHAUSTED. Chunk bytes that
-// do not parse as a Document are INVALID_ARGUMENT. A failed VLM call is NOT
-// an RPC error: the item is reported as ItemSkipped with reason
-// SKIP_REASON_VLM_ERROR and the remaining items continue.
+// do not parse as a Document are INVALID_ARGUMENT. A per-request VLM
+// endpoint the server's operator has not allowed is PERMISSION_DENIED. A
+// failed VLM call is NOT an RPC error: the item is reported as ItemSkipped
+// with reason SKIP_REASON_VLM_ERROR and the remaining items continue.
 service EnrichService {
   // Enriches one document. The client sends exactly one EnrichOptions message
   // first (carrying the document inline, or followed by DocumentChunk
@@ -96,10 +97,12 @@ message EnrichOptions {
   // CODE_FORMULA_PRESET_UNSPECIFIED. Passed through to the endpoint.
   string code_formula_preset_raw = 11;
   // Per-request override of the VLM endpoint URL. When empty the server's
-  // configured default (ENRICH_VLM_URL) is used. Either a base URL (the
-  // server appends /v1/chat/completions) or a full endpoint URL: one whose
-  // path ends in /chat/completions, or that carries a query string, is used
-  // verbatim.
+  // configured default (ENRICH_VLM_URL) is used. Accepted only when the
+  // server's operator allows per-request endpoints (ENRICH_ALLOW_REQUEST_ENDPOINT,
+  // or an ENRICH_VLM_ENDPOINT_ALLOWLIST naming this URL's origin); otherwise
+  // the RPC fails with PERMISSION_DENIED. Either a base URL (the server
+  // appends /v1/chat/completions) or a full endpoint URL: one whose path ends
+  // in /chat/completions, or that carries a query string, is used verbatim.
   string vlm_endpoint = 12;
   // Maximum number of VLM calls in flight for this request. Zero uses the
   // server's configured default; values above the server cap are clamped.
@@ -149,7 +152,9 @@ message ChartExtractionOptions {
   string model = 5;
   // VLM endpoint for the chart calls only. Non-empty overrides
   // EnrichOptions.vlm_endpoint and the server default (ENRICH_VLM_URL), so
-  // charts can go to a chart model while pictures go elsewhere.
+  // charts can go to a chart model while pictures go elsewhere. A
+  // per-request endpoint like EnrichOptions.vlm_endpoint: refused with
+  // PERMISSION_DENIED unless the server's operator allows it.
   string vlm_endpoint = 6;
 }
 
@@ -294,7 +299,9 @@ message ItemSkipped {
   string self_ref = 1;
   // Why the item was skipped.
   SkipReason reason = 2;
-  // Human-readable detail (for example the VLM endpoint's error).
+  // Human-readable detail (for example the VLM endpoint's error). For a
+  // per-request endpoint it names the failure (HTTP status, timeout) but
+  // never carries bytes that endpoint sent.
   string detail = 3;
   // For a chart item, which chart output this skip is about (one chart can
   // produce a table, a summary and code, each skipped on its own).
@@ -396,8 +403,11 @@ message GetServiceInfoResponse {
   string service_version = 1;
   // The wire API version, for example "v1".
   string api_version = 2;
-  // The process-default VLM endpoint (ENRICH_VLM_URL), empty when
-  // unconfigured. Per-request EnrichOptions.vlm_endpoint overrides it.
+  // The origin (scheme://host:port) of the process-default VLM endpoint
+  // (ENRICH_VLM_URL), empty when unconfigured. Userinfo, path, and query are
+  // never reported, so a credential in the configured URL stays private.
+  // Per-request EnrichOptions.vlm_endpoint overrides the endpoint when the
+  // operator allows it.
   string default_vlm_endpoint = 3;
   // The byte cap on the assembled document (RESOURCE_EXHAUSTED above it).
   uint64 max_document_bytes = 4;

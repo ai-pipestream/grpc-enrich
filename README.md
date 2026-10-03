@@ -47,7 +47,10 @@ ENRICH_VLM_URL=http://localhost:8080 \
 |---|---|---|
 | `ENRICH_PORT` | `50056` | gRPC listen port |
 | `ENRICH_HTTP_PORT` | `50068` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
-| `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Per-request `EnrichOptions.vlm_endpoint` overrides |
+| `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Logs and `GetServiceInfo` show only its origin |
+| `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
+| `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
+| `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Assembled document byte cap (`RESOURCE_EXHAUSTED` above) |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
 | `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included) |
@@ -71,9 +74,9 @@ v1alpha).
   `ItemSkipped` per item as that VLM call returns, `EnrichComplete` trailer.
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
   VLM call is an `ItemSkipped` (`SKIP_REASON_VLM_ERROR`), never an RPC error.
-- `GetServiceInfo`: versions, default endpoint, byte cap, concurrency cap, and
-  the `UiInfo` frontend advertisement (tab title/path/tooltip) shared with the
-  other ai-pipestream services.
+- `GetServiceInfo`: versions, the default endpoint's origin, byte cap,
+  concurrency cap, and the `UiInfo` frontend advertisement (tab title/path/
+  tooltip) shared with the other ai-pipestream services.
 
 `ai/pipestream/document/v1/document.proto` is vendored verbatim from gRParse
 (the canonical copy); do not edit it here.
@@ -105,7 +108,9 @@ chunked route, so `item_images` crops apply and the byte cap is enforced).
   `{"events": [<EnrichDocumentResponse as proto3 JSON>, ...]}` in stream
   order (started, per-item annotation/skipped, complete trailer).
   `200` on success, `400` on `INVALID_ARGUMENT` (malformed JSON, no
-  document), `413` on `RESOURCE_EXHAUSTED` (byte cap), `500` otherwise.
+  document), `403` on `PERMISSION_DENIED` (a per-request endpoint the
+  operator has not allowed), `413` on `RESOURCE_EXHAUSTED` (byte cap), `500`
+  otherwise.
 - `POST /v1/enrich/stream`: the same request, answered as chunked NDJSON
   (`application/x-ndjson`): each `EnrichDocumentResponse` is written as one
   flushed line the moment the stream produces it, so HTTP callers see the
@@ -203,6 +208,27 @@ URL, so Docling's `picture_description_api.url` works as given:
 | `https://api.example.com/v1`, `http://ovms:8000/v3` (path ends in a version) | `<url>/chat/completions` |
 | `http://localhost:8000/v1/chat/completions`, `http://ovms:8000/v3/chat/completions` | used verbatim |
 | any URL with a query string (Azure `...?api-version=...`) | used verbatim |
+
+## Security
+
+The ports have no authentication, so the service treats every caller as
+untrusted:
+
+- **Per-request endpoints are refused by default.** `vlm_endpoint` and
+  `chart_extraction.vlm_endpoint` make this server send HTTP requests to a
+  URL the caller picks (gRParse fills `vlm_endpoint` from the end user's
+  Docling `picture_description_api.url`). They are `PERMISSION_DENIED` unless
+  the operator sets `ENRICH_ALLOW_REQUEST_ENDPOINT=true` (any http(s) URL:
+  only when every caller may reach whatever this server can reach, cluster
+  services and cloud metadata included) or lists the allowed origins in
+  `ENRICH_VLM_ENDPOINT_ALLOWLIST`, the safer choice. This mirrors Docling's
+  `enable_remote_services`.
+- **The operator's key stays with the operator's endpoint.**
+  `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`.
+- **No response echo.** A failure on a per-request endpoint is reported by
+  HTTP status or failure type only, never with bytes that endpoint sent, so
+  the service cannot be used to read pages from hosts the caller could not
+  reach itself. Failures on `ENRICH_VLM_URL` keep the endpoint's error text.
 
 ## Start here (humans and LLMs)
 
