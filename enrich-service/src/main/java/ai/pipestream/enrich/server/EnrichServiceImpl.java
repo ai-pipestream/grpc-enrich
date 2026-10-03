@@ -29,11 +29,20 @@ import java.util.concurrent.atomic.AtomicLong;
  * marked complete (crops must precede it). RPC-level failures are
  * INVALID_ARGUMENT / RESOURCE_EXHAUSTED / PERMISSION_DENIED; a failed VLM
  * call is an ItemSkipped event, never an RPC error.
+ *
+ * <p><b>Memory bound.</b> The byte cap covers everything one call holds: the
+ * document, inline or assembled from chunks, plus its ItemImage crops, and
+ * at most {@link #MAX_CROPS} crops. Crops after enrichment started are a
+ * protocol error rather than bytes held for nothing.
  */
 public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImplBase {
 
   public static final String SERVICE_VERSION = "0.1.0";
   public static final String API_VERSION = "v1";
+
+  /** Most ItemImage crops one call may send: each costs a map entry beyond
+   * its bytes, so tiny crops must be bounded by count, not only by size. */
+  public static final int MAX_CROPS = 100_000;
 
   // Frontend advertisement for the shared demo shell; same UiInfo shape in
   // every ai-pipestream grpc service.
@@ -74,6 +83,8 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
       // so chunked uploads are never copied into an intermediate array.
       private ByteString chunks = ByteString.EMPTY;
       private final Map<String, ItemImage> crops = new HashMap<>();
+      // Serialized bytes of the crops held, counted against the byte cap.
+      private long cropBytes;
       private EnrichOptions options;
       private boolean started;
       private boolean terminated;
@@ -103,6 +114,15 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
             return;
           }
           if (options.hasDocument()) {
+            // The gRPC message limit only bounds the whole frame (cap plus
+            // framing), and the HTTP shim has no frame limit at all, so the
+            // cap is checked here, exactly.
+            if (options.getDocument().getSerializedSize() > maxDocumentBytes) {
+              rejected.incrementAndGet();
+              fail(Status.RESOURCE_EXHAUSTED, "inline document exceeds the byte cap of "
+                  + maxDocumentBytes);
+              return;
+            }
             start(options.getDocument());
           }
           return;
@@ -111,9 +131,33 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
           case OPTIONS -> fail(Status.INVALID_ARGUMENT, "EnrichOptions was already received");
           case CHUNK -> onChunk(request.getChunk().getData(),
               request.getChunk().getComplete());
-          case IMAGE -> crops.put(request.getImage().getSelfRef(), request.getImage());
+          case IMAGE -> onImage(request.getImage());
           default -> fail(Status.INVALID_ARGUMENT, "empty request message");
         }
+      }
+
+      private void onImage(ItemImage image) {
+        if (started) {
+          fail(Status.INVALID_ARGUMENT, "ItemImage arrived after enrichment started; send crops"
+              + " before the chunk marked complete (an inline document takes no crops)");
+          return;
+        }
+        ItemImage replaced = crops.get(image.getSelfRef());
+        if (replaced == null && crops.size() >= MAX_CROPS) {
+          rejected.incrementAndGet();
+          fail(Status.RESOURCE_EXHAUSTED, "more than " + MAX_CROPS + " ItemImage crops");
+          return;
+        }
+        long held = cropBytes + image.getSerializedSize()
+            - (replaced == null ? 0 : replaced.getSerializedSize());
+        if (chunks.size() + held > maxDocumentBytes) {
+          rejected.incrementAndGet();
+          fail(Status.RESOURCE_EXHAUSTED, "document chunks plus ItemImage crops exceed the byte"
+              + " cap of " + maxDocumentBytes);
+          return;
+        }
+        crops.put(image.getSelfRef(), image);
+        cropBytes = held;
       }
 
       private void onChunk(ByteString data, boolean complete) {
@@ -121,10 +165,10 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
           fail(Status.INVALID_ARGUMENT, "document was already received");
           return;
         }
-        if (chunks.size() + data.size() > maxDocumentBytes) {
+        if (chunks.size() + cropBytes + data.size() > maxDocumentBytes) {
           rejected.incrementAndGet();
-          fail(Status.RESOURCE_EXHAUSTED, "assembled document exceeds the byte cap of "
-              + maxDocumentBytes);
+          fail(Status.RESOURCE_EXHAUSTED, "assembled document plus ItemImage crops exceed the"
+              + " byte cap of " + maxDocumentBytes);
           return;
         }
         chunks = chunks.concat(data);
@@ -200,6 +244,11 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
         }
       }
     };
+  }
+
+  /** The byte cap on a document plus its crops. */
+  long maxDocumentBytes() {
+    return maxDocumentBytes;
   }
 
   @Override

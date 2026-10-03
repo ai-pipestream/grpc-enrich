@@ -26,7 +26,7 @@ import java.util.Set;
  * @param vlmEndpointAllowlist origins a request may name even when
  *     {@code allowRequestEndpoint} is off (ENRICH_VLM_ENDPOINT_ALLOWLIST,
  *     comma-separated, for example {@code https://vlm.internal:8443})
- * @param maxDocumentBytes assembled-document byte cap
+ * @param maxDocumentBytes byte cap on a document plus its crops
  *     (ENRICH_MAX_DOCUMENT_MIB)
  * @param maxConcurrentVlm cap on concurrent VLM calls per request
  *     (ENRICH_MAX_CONCURRENT_VLM; defaults to cores, min 2)

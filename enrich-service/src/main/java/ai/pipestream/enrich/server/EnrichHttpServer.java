@@ -42,19 +42,31 @@ import java.util.concurrent.LinkedBlockingQueue;
  * EnrichDocumentResponse event as the stream produces it, with a final
  * {@code {"error":…}} line when the stream fails mid-flight;
  * {@code GET /healthz} is a static 200 "ok".
+ *
+ * <p><b>Body limit.</b> A request body is read into memory and parsed into
+ * several copies, so it is capped before any of that: 4/3 of the service's
+ * byte cap (base64 for crops and bytes fields) plus 1 MiB of JSON
+ * structure. A larger Content-Length is answered 413 without reading the
+ * body; a body without one is read up to the limit and no further.
  */
 public final class EnrichHttpServer implements AutoCloseable {
 
   private static final String DONE = "DONE";
+
+  /** JSON structure allowance on top of the base64-expanded byte cap. */
+  private static final long BODY_SLACK_BYTES = 1L << 20;
 
   /** NDJSON needs one line per event, so the compact printer everywhere. */
   private static final JsonFormat.Printer PRINTER =
       JsonFormat.printer().omittingInsignificantWhitespace();
 
   private final HttpServer server;
+  private final int maxBodyBytes;
 
   public EnrichHttpServer(int port, EnrichServiceImpl service, Executor executor)
       throws IOException {
+    long cap = service.maxDocumentBytes();
+    maxBodyBytes = (int) Math.min(Integer.MAX_VALUE - 8, cap + cap / 3 + BODY_SLACK_BYTES);
     server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
     server.createContext("/healthz", EnrichHttpServer::healthz);
     server.createContext("/v1/enrich", exchange -> enrichSync(service, exchange));
@@ -184,13 +196,42 @@ public final class EnrichHttpServer implements AutoCloseable {
     }
   }
 
-  private static void enrichSync(EnrichServiceImpl service, HttpExchange exchange)
+  /**
+   * The request body as text, or null after answering 413 when it is over
+   * {@link #maxBodyBytes}. Never reads more than one byte past the limit.
+   */
+  private String readBody(HttpExchange exchange) throws IOException {
+    String declared = exchange.getRequestHeaders().getFirst("Content-Length");
+    if (declared != null) {
+      long length;
+      try {
+        length = Long.parseLong(declared.strip());
+      } catch (NumberFormatException unparseable) {
+        length = -1;
+      }
+      if (length > maxBodyBytes) {
+        sendError(exchange, 413, "request body exceeds the " + maxBodyBytes + "-byte limit");
+        return null;
+      }
+    }
+    byte[] body = exchange.getRequestBody().readNBytes(maxBodyBytes + 1);
+    if (body.length > maxBodyBytes) {
+      sendError(exchange, 413, "request body exceeds the " + maxBodyBytes + "-byte limit");
+      return null;
+    }
+    return new String(body, StandardCharsets.UTF_8);
+  }
+
+  private void enrichSync(EnrichServiceImpl service, HttpExchange exchange)
       throws IOException {
     if (!"POST".equals(exchange.getRequestMethod())) {
       sendError(exchange, 405, "POST only");
       return;
     }
-    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+    String body = readBody(exchange);
+    if (body == null) {
+      return;
+    }
     final Envelope envelope;
     try {
       envelope = parseEnvelope(body);
@@ -223,13 +264,16 @@ public final class EnrichHttpServer implements AutoCloseable {
     sendJson(exchange, 200, json.toString());
   }
 
-  private static void enrichStream(EnrichServiceImpl service, HttpExchange exchange)
+  private void enrichStream(EnrichServiceImpl service, HttpExchange exchange)
       throws IOException {
     if (!"POST".equals(exchange.getRequestMethod())) {
       sendError(exchange, 405, "POST only");
       return;
     }
-    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+    String body = readBody(exchange);
+    if (body == null) {
+      return;
+    }
     final Envelope envelope;
     try {
       envelope = parseEnvelope(body);

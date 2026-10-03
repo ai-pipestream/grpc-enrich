@@ -26,12 +26,13 @@ option java_package = "ai.pipestream.enrich.v1";
 // events are never buffered into a single batch.
 //
 // Error model: a stream whose first message is not EnrichOptions, or that
-// ends without any document, is INVALID_ARGUMENT. Assembled DocumentChunk
-// bytes above the server's byte cap are RESOURCE_EXHAUSTED. Chunk bytes that
-// do not parse as a Document are INVALID_ARGUMENT. A per-request VLM
-// endpoint the server's operator has not allowed is PERMISSION_DENIED. A
-// failed VLM call is NOT an RPC error: the item is reported as ItemSkipped
-// with reason SKIP_REASON_VLM_ERROR and the remaining items continue.
+// ends without any document, is INVALID_ARGUMENT. A document (inline, or
+// assembled from DocumentChunk bytes) plus its ItemImage crops above the
+// server's byte cap is RESOURCE_EXHAUSTED. Chunk bytes that do not parse as a
+// Document are INVALID_ARGUMENT. A per-request VLM endpoint the server's
+// operator has not allowed is PERMISSION_DENIED. A failed VLM call is NOT
+// an RPC error: the item is reported as ItemSkipped with reason
+// SKIP_REASON_VLM_ERROR and the remaining items continue.
 service EnrichService {
   // Enriches one document. The client sends exactly one EnrichOptions message
   // first (carrying the document inline, or followed by DocumentChunk
@@ -409,7 +410,8 @@ message GetServiceInfoResponse {
   // Per-request EnrichOptions.vlm_endpoint overrides the endpoint when the
   // operator allows it.
   string default_vlm_endpoint = 3;
-  // The byte cap on the assembled document (RESOURCE_EXHAUSTED above it).
+  // The byte cap on the document plus its ItemImage crops
+  // (RESOURCE_EXHAUSTED above it).
   uint64 max_document_bytes = 4;
   // The server-wide cap on concurrent VLM calls per request.
   uint32 max_concurrent_vlm_calls = 5;

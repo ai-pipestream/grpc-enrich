@@ -72,7 +72,7 @@ drives the existing `EnrichServiceImpl` through an in-process
 half-close exactly as a wire client would. `POST /v1/enrich` buffers the
 events into one `{"events": [...]}` reply (400 / 403 / 413 / 500 mapped from
 `INVALID_ARGUMENT` / `PERMISSION_DENIED` / `RESOURCE_EXHAUSTED` / anything
-else);
+else; bodies over 4/3 of the byte cap plus 1 MiB are 413 before parsing);
 `POST /v1/enrich/stream` forwards each event as a flushed NDJSON line so HTTP
 callers get the same live per-item stream; `GET /healthz` is a static 200.
 `GetServiceInfo` remains gRPC-only.

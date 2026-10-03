@@ -51,7 +51,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
 | `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
 | `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off |
-| `ENRICH_MAX_DOCUMENT_MIB` | `70` | Assembled document byte cap (`RESOURCE_EXHAUSTED` above) |
+| `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
 | `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included) |
 | `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables |
@@ -69,7 +69,8 @@ v1alpha).
   `do_picture_description`, `do_chart_extraction`, `do_code_enrichment`,
   `do_formula_enrichment`, enum presets with `*_raw` fallbacks, endpoint /
   concurrency / timeout overrides) plus the document inline or as
-  `DocumentChunk` slices; `ItemImage` messages carry stripped crops.
+  `DocumentChunk` slices; `ItemImage` messages carry stripped crops, sent
+  before the chunk marked complete (at most 100000, inside the byte cap).
   Events: `EnrichStarted` (counts selected), one `ItemAnnotation` or
   `ItemSkipped` per item as that VLM call returns, `EnrichComplete` trailer.
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
@@ -102,15 +103,17 @@ Request body for both enrich endpoints:
 `options` is an `EnrichOptions` message (the document may ride inline in
 `options.document`, as here) and `document` is an optional top-level
 `Document` message (mutually exclusive with `options.document`; it goes the
-chunked route, so `item_images` crops apply and the byte cap is enforced).
+chunked route, so `item_images` crops apply). The byte cap applies either
+way. A body over 4/3 of the byte cap plus 1 MiB is answered 413 before it is
+parsed (from `Content-Length` when present, without reading the body).
 
 - `POST /v1/enrich`: collects the whole stream and returns it at once:
   `{"events": [<EnrichDocumentResponse as proto3 JSON>, ...]}` in stream
   order (started, per-item annotation/skipped, complete trailer).
   `200` on success, `400` on `INVALID_ARGUMENT` (malformed JSON, no
   document), `403` on `PERMISSION_DENIED` (a per-request endpoint the
-  operator has not allowed), `413` on `RESOURCE_EXHAUSTED` (byte cap), `500`
-  otherwise.
+  operator has not allowed), `413` on `RESOURCE_EXHAUSTED` (byte cap, body
+  limit), `500` otherwise.
 - `POST /v1/enrich/stream`: the same request, answered as chunked NDJSON
   (`application/x-ndjson`): each `EnrichDocumentResponse` is written as one
   flushed line the moment the stream produces it, so HTTP callers see the
