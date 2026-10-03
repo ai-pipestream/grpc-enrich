@@ -29,10 +29,13 @@ public final class GrpcEnrichServer {
   private GrpcEnrichServer() {}
 
   public static void main(String[] args) throws Exception {
+    // Before anything touches the JDK HTTP client: pinned VLM clients send
+    // a Host header of their own.
+    OpenAiCompatVlmClient.allowHostHeader();
     EnrichConfig config = EnrichConfig.fromEnv();
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     EnrichmentEngine engine = new EnrichmentEngine(
-        OpenAiCompatVlmClient::new,
+        OpenAiCompatVlmClient.FACTORY,
         config.endpointPolicy(),
         config.maxConcurrentVlm(),
         config.maxConcurrentVlm(),

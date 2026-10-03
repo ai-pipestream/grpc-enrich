@@ -25,7 +25,10 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
+import ai.pipestream.enrich.vlm.PublicAddress;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -48,6 +51,42 @@ final class InProcessEnrich implements AutoCloseable {
   static final String PNG_DATA_URI = "data:image/png;base64,"
       + Base64.getEncoder().encodeToString(new byte[] {(byte) 0x89, 'P', 'N', 'G', 1, 2, 3});
 
+  /** Where every {@code .test} name resolves: a public address, so a caller
+   * endpoint under such a name passes the public-address check. */
+  static final InetAddress PUBLIC_TEST_ADDRESS = InetAddress.ofLiteral("93.184.215.14");
+
+  /** The test DNS: {@code .test} names resolve to {@link #PUBLIC_TEST_ADDRESS},
+   * anything else does not resolve. */
+  static final PublicAddress.Resolver TEST_DNS = host -> {
+    if (host.endsWith(".test")) {
+      return new InetAddress[] {PUBLIC_TEST_ADDRESS};
+    }
+    throw new UnknownHostException(host);
+  };
+
+  /**
+   * The real HTTP VLM client with a 5ms backoff. A pinned client is the real
+   * pinned client too, with the test network routing
+   * {@link #PUBLIC_TEST_ADDRESS} to this machine, where the fakes listen.
+   */
+  static final VlmClient.Factory REAL_CLIENTS = new VlmClient.Factory() {
+    @Override
+    public VlmClient create(String endpoint) {
+      return new OpenAiCompatVlmClient(endpoint, Duration.ofMillis(5));
+    }
+
+    @Override
+    public VlmClient createPinned(String endpoint, InetAddress address) {
+      assertThat(address).isEqualTo(PUBLIC_TEST_ADDRESS);
+      try {
+        return OpenAiCompatVlmClient.pinned(endpoint, InetAddress.getLoopbackAddress(),
+            Duration.ofMillis(5), javax.net.ssl.SSLContext.getDefault());
+      } catch (java.security.NoSuchAlgorithmException noTls) {
+        throw new IllegalStateException(noTls);
+      }
+    }
+  };
+
   final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
   final EnrichmentEngine engine;
   final EnrichServiceImpl service;
@@ -63,7 +102,7 @@ final class InProcessEnrich implements AutoCloseable {
       ScheduledExecutorService timers) throws IOException {
     this.timers = timers;
     engine = new EnrichmentEngine(clients, endpoints, defaultConcurrency, maxConcurrency,
-        timeout, executor);
+        timeout, executor, TEST_DNS);
     service = new EnrichServiceImpl(maxDocumentBytes, engine, executor,
         endpoints.defaultEndpoint(), maxConcurrency);
     String name = InProcessServerBuilder.generateName();
@@ -79,15 +118,14 @@ final class InProcessEnrich implements AutoCloseable {
     stub = EnrichServiceGrpc.newStub(channel);
   }
 
-  /** The real HTTP VLM client with a 5ms backoff, defaults for the rest. */
+  /** {@link #REAL_CLIENTS}, defaults for the rest. */
   static InProcessEnrich start(EndpointPolicy endpoints) throws IOException {
     return start(endpoints, 4, 16, Duration.ofSeconds(10), 64L * 1024 * 1024);
   }
 
   static InProcessEnrich start(EndpointPolicy endpoints, int defaultConcurrency,
       int maxConcurrency, Duration timeout, long maxDocumentBytes) throws IOException {
-    return start(endpoint -> new OpenAiCompatVlmClient(endpoint, Duration.ofMillis(5)),
-        endpoints, defaultConcurrency, maxConcurrency, timeout, maxDocumentBytes);
+    return start(REAL_CLIENTS, endpoints, defaultConcurrency, maxConcurrency, timeout, maxDocumentBytes);
   }
 
   static InProcessEnrich start(VlmClient.Factory clients, EndpointPolicy endpoints,

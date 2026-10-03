@@ -49,7 +49,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_HTTP_PORT` | `50068` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
 | `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Logs and `GetServiceInfo` show only its origin |
 | `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
-| `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
+| `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint on a public address (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
 | `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off. The origin of `ENRICH_VLM_URL` is always allowed and need not be listed |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Process-wide cap on concurrent VLM calls, shared by every request; also bounds `EnrichOptions.concurrency` |
@@ -236,13 +236,26 @@ untrusted:
   `chart_extraction.vlm_endpoint` make this server send HTTP requests to a
   URL the caller picks (gRParse fills `vlm_endpoint` from the end user's
   Docling `picture_description_api.url`). They are `PERMISSION_DENIED` unless
-  the operator sets `ENRICH_ALLOW_REQUEST_ENDPOINT=true` (any http(s) URL:
-  only when every caller may reach whatever this server can reach, cluster
-  services and cloud metadata included) or lists the allowed origins in
+  the operator sets `ENRICH_ALLOW_REQUEST_ENDPOINT=true` (any http(s) URL
+  on a public address, see below) or lists the allowed origins in
   `ENRICH_VLM_ENDPOINT_ALLOWLIST`, the safer choice. An endpoint on the
   same origin (scheme, host, port) as `ENRICH_VLM_URL` is always allowed,
   since it is the operator's own. This mirrors Docling's
   `enable_remote_services`.
+- **"Any endpoint" means a public one.** With
+  `ENRICH_ALLOW_REQUEST_ENDPOINT=true`, an endpoint that is neither
+  allowlisted nor on the origin of `ENRICH_VLM_URL` must resolve only to
+  public addresses: loopback, private (RFC 1918, unique local), link-local
+  (cloud metadata at `169.254.169.254`, `fd00:ec2::254`), carrier-grade NAT,
+  multicast, and reserved ranges are refused, including IPv4 carried inside
+  IPv6. An IP literal is refused with `PERMISSION_DENIED`; a host name is
+  resolved once per request, every address it resolves to is checked, and
+  the calls connect to the checked address, sending the host name as the
+  Host header and the TLS server name (the certificate is checked against
+  it), so DNS rebinding cannot redirect them. Such calls use HTTP/1.1. The
+  JVM needs `-Djdk.httpclient.allowRestrictedHeaders=host` for the Host
+  header; the server sets it at startup, and without it these calls are
+  refused rather than sent unpinned.
 - **The operator's key stays with the operator's endpoint.**
   `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`, and only on calls
   whose request names no endpoint: a per-request endpoint never gets it,

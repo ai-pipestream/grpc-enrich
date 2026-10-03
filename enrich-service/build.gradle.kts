@@ -20,3 +20,11 @@ dependencies {
 application {
     mainClass = "ai.pipestream.enrich.server.GrpcEnrichServer"
 }
+
+// Pinned VLM clients send a Host header of their own, which the JDK HTTP
+// client allows only with this property set before its first use. The
+// server sets it at startup; the test JVM sets it here, since any test may
+// be the first to touch the JDK HTTP client.
+tasks.test {
+    systemProperty("jdk.httpclient.allowRestrictedHeaders", "host")
+}

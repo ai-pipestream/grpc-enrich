@@ -2,7 +2,9 @@ package ai.pipestream.enrich.vlm;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
@@ -10,9 +12,11 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -23,6 +27,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
 
 /**
  * VLM client for any OpenAI-compatible chat-completions endpoint (llama.cpp's
@@ -49,8 +56,37 @@ import java.util.concurrent.TimeoutException;
  * the exchange is cancelled past that, so an endpoint cannot stream
  * gigabytes into the heap. An interrupt (the RPC was cancelled) aborts the
  * exchange at once.
+ *
+ * <p><b>Pinned clients.</b> {@link #pinned} binds a client to one checked IP
+ * address for a caller-chosen endpoint: the request goes to that address
+ * literally, so the JDK never resolves the host name again, and the host
+ * name still goes out as the Host header and as the TLS server name, which
+ * is also the name the server certificate is checked against. Setting the
+ * Host header needs {@code jdk.httpclient.allowRestrictedHeaders=host},
+ * which {@link #allowHostHeader()} sets; it has to run before the JDK HTTP
+ * client is first used, so the server calls it first thing.
  */
 public final class OpenAiCompatVlmClient implements VlmClient {
+
+  private static final String RESTRICTED_HEADERS_PROPERTY =
+      "jdk.httpclient.allowRestrictedHeaders";
+
+  static {
+    allowHostHeader();
+  }
+
+  /** Builds shared-pool clients, and pinned ones for caller endpoints. */
+  public static final VlmClient.Factory FACTORY = new VlmClient.Factory() {
+    @Override
+    public VlmClient create(String endpoint) {
+      return new OpenAiCompatVlmClient(endpoint);
+    }
+
+    @Override
+    public VlmClient createPinned(String endpoint, InetAddress address) {
+      return pinned(endpoint, address);
+    }
+  };
 
   /** Cap on one response body; far above any real chat-completions reply. */
   public static final int MAX_RESPONSE_BYTES = 4 << 20;
@@ -70,6 +106,10 @@ public final class OpenAiCompatVlmClient implements VlmClient {
 
   private final URI completionsUri;
   private final HttpClient http;
+  /** Whether {@link #http} is this client's own, to shut down on close. */
+  private final boolean ownsHttp;
+  /** The Host header a pinned client sends; null to let the JDK set it. */
+  private final String hostHeader;
   private final Duration baseBackoff;
 
   public OpenAiCompatVlmClient(String endpoint) {
@@ -83,9 +123,102 @@ public final class OpenAiCompatVlmClient implements VlmClient {
    *     https URL with a host
    */
   public OpenAiCompatVlmClient(String endpoint, Duration baseBackoff) {
-    this.completionsUri = VlmEndpoint.completionsUri(endpoint);
-    this.http = SHARED_HTTP;
+    this(VlmEndpoint.completionsUri(endpoint), SHARED_HTTP, false, null, baseBackoff);
+  }
+
+  private OpenAiCompatVlmClient(URI completionsUri, HttpClient http, boolean ownsHttp,
+      String hostHeader, Duration baseBackoff) {
+    this.completionsUri = completionsUri;
+    this.http = http;
+    this.ownsHttp = ownsHttp;
+    this.hostHeader = hostHeader;
     this.baseBackoff = baseBackoff;
+  }
+
+  /**
+   * Lets this process's JDK HTTP client send a Host header of its own, which
+   * a pinned client needs. Idempotent; has no effect once the JDK HTTP
+   * client has been used, so call it at startup.
+   */
+  public static void allowHostHeader() {
+    String allowed = System.getProperty(RESTRICTED_HEADERS_PROPERTY);
+    if (allowed == null || allowed.isBlank()) {
+      System.setProperty(RESTRICTED_HEADERS_PROPERTY, "host");
+    } else if (List.of(allowed.split(",")).stream()
+        .noneMatch(name -> name.strip().equalsIgnoreCase("host"))) {
+      System.setProperty(RESTRICTED_HEADERS_PROPERTY, allowed + ",host");
+    }
+  }
+
+  /**
+   * A client for {@code endpoint} that connects to {@code address} only:
+   * see the class comment. An endpoint whose host is already an IP literal
+   * needs no pinning and uses the shared pool.
+   *
+   * @throws IllegalArgumentException when {@code endpoint} is not an http or
+   *     https URL with a host, or this JVM does not let the client set the
+   *     Host header
+   */
+  public static OpenAiCompatVlmClient pinned(String endpoint, InetAddress address) {
+    try {
+      return pinned(endpoint, address, DEFAULT_BASE_BACKOFF, SSLContext.getDefault());
+    } catch (NoSuchAlgorithmException noTls) {
+      throw new IllegalStateException("no default TLS context", noTls);
+    }
+  }
+
+  /** Test seam for {@link #pinned(String, InetAddress)}: the retry backoff
+   * and the TLS context that decides which certificates are trusted. */
+  public static OpenAiCompatVlmClient pinned(
+      String endpoint, InetAddress address, Duration baseBackoff, SSLContext tls) {
+    URI named = VlmEndpoint.completionsUri(endpoint);
+    String host = named.getHost();
+    if (PublicAddress.literal(host) != null) {
+      return new OpenAiCompatVlmClient(named, SHARED_HTTP, false, null, baseBackoff);
+    }
+    // Rebuilt from the raw bytes so an IPv6 scope id never ends up in the URL.
+    String literal;
+    try {
+      literal = InetAddress.getByAddress(address.getAddress()).getHostAddress();
+    } catch (UnknownHostException impossible) {
+      throw new IllegalArgumentException("unusable address");
+    }
+    if (literal.contains(":")) {
+      literal = "[" + literal + "]";
+    }
+    int port = named.getPort();
+    String scheme = named.getScheme().toLowerCase(Locale.ROOT);
+    boolean defaultPort = port == -1
+        || (scheme.equals("http") && port == 80)
+        || (scheme.equals("https") && port == 443);
+    URI target = URI.create(scheme + "://" + literal + (port == -1 ? "" : ":" + port)
+        + (named.getRawPath() == null ? "" : named.getRawPath())
+        + (named.getRawQuery() == null ? "" : "?" + named.getRawQuery()));
+    String hostHeader = defaultPort ? host : host + ":" + port;
+    try {
+      HttpRequest.newBuilder(target).header("Host", hostHeader);
+    } catch (IllegalArgumentException restricted) {
+      throw new IllegalArgumentException("this JVM does not let the VLM client set the Host"
+          + " header; start it with -D" + RESTRICTED_HEADERS_PROPERTY + "=host");
+    }
+    SSLParameters tlsParameters = tls.getDefaultSSLParameters();
+    tlsParameters.setServerNames(List.of(new SNIHostName(host)));
+    // HTTP/1.1, so the Host header is what the server sees (HTTP/2 would
+    // send the address as :authority).
+    HttpClient own = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(10))
+        .version(HttpClient.Version.HTTP_1_1)
+        .sslContext(tls)
+        .sslParameters(tlsParameters)
+        .build();
+    return new OpenAiCompatVlmClient(target, own, true, hostHeader, baseBackoff);
+  }
+
+  @Override
+  public void close() {
+    if (ownsHttp) {
+      http.shutdown();
+    }
   }
 
   @Override
@@ -151,6 +284,9 @@ public final class OpenAiCompatVlmClient implements VlmClient {
         .timeout(call.timeout())
         .header("Content-Type", "application/json")
         .POST(requestBody(call));
+    if (hostHeader != null) {
+      builder.header("Host", hostHeader);
+    }
     for (Header header : call.headers()) {
       try {
         builder.header(header.name(), header.value());
