@@ -50,7 +50,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Per-request `EnrichOptions.vlm_endpoint` overrides |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Assembled document byte cap (`RESOURCE_EXHAUSTED` above) |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
-| `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout |
+| `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included) |
 | `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables |
 
 The server registers `grpc.health.v1.Health` and server reflection (v1 and
@@ -186,9 +186,10 @@ Generation budgets (`max_tokens`): description 200, code/formula 2048, chart
 
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
 retried up to 5 times with exponential backoff starting at 0.1s, then the
-item is skipped with `SKIP_REASON_VLM_ERROR` rather than failing the RPC.
-Every skip carries an explicit reason, and description annotations record the
-model name as provenance.
+item is skipped with `SKIP_REASON_VLM_ERROR` rather than failing the RPC. A
+reply larger than 4 MiB, or one that does not finish within the per-call
+timeout, is a skip too. Every skip carries an explicit reason, and
+description annotations record the model name as provenance.
 
 ## VLM endpoint URLs
 

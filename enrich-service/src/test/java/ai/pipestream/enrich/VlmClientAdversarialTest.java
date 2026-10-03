@@ -35,6 +35,10 @@ class VlmClientAdversarialTest {
     volatile int status = 200;
     volatile String body = "";
     volatile String retryAfter;
+    /** When positive, the body is sent this many bytes at a time, one chunk
+     * every {@code dripMillis}. */
+    volatile int dripBytes;
+    volatile long dripMillis;
 
     RawVlmServer() throws IOException {
       server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -50,9 +54,20 @@ class VlmClientAdversarialTest {
         }
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream out = exchange.getResponseBody()) {
-          out.write(bytes);
+          if (dripBytes <= 0) {
+            out.write(bytes);
+            return;
+          }
+          for (int at = 0; at < bytes.length; at += dripBytes) {
+            out.write(bytes, at, Math.min(dripBytes, bytes.length - at));
+            out.flush();
+            Thread.sleep(dripMillis);
+          }
+        } catch (InterruptedException | IOException gone) {
+          // The client hung up mid-drip; nothing left to send.
         }
       });
+      server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
       server.start();
     }
 
@@ -280,6 +295,40 @@ class VlmClientAdversarialTest {
           new OpenAiCompatVlmClient(vlm.url() + "/v3", Duration.ofMillis(1));
       assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/v3/chat/completions");
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Bounded replies: size and time
+  // -------------------------------------------------------------------------
+
+  @Test
+  void oversizedReply_isAnErrorNotBuffered() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      vlm.body = chatBody("\"" + "x".repeat(OpenAiCompatVlmClient.MAX_RESPONSE_BYTES) + "\"");
+      OpenAiCompatVlmClient client = new OpenAiCompatVlmClient(vlm.url(), Duration.ofMillis(1));
+      VlmException error = catchThrowableOfType(VlmException.class,
+          () -> client.complete("m", "p", null, 10, Duration.ofSeconds(10)));
+      assertThat(error.getMessage()).contains("exceeds");
+      assertThat(vlm.calls.get()).as("an oversized reply is not retried").isEqualTo(1);
+    }
+  }
+
+  @Test
+  void trickledReply_isBoundedByTheTimeout() throws Exception {
+    try (RawVlmServer vlm = new RawVlmServer()) {
+      // Headers at once, then one byte every 100ms: the request timeout alone
+      // only covers the headers, so without a whole-reply deadline this call
+      // takes ~10 seconds (and could be made to take days).
+      vlm.body = chatBody("\"" + "x".repeat(60) + "\"");
+      vlm.dripBytes = 1;
+      vlm.dripMillis = 100;
+      OpenAiCompatVlmClient client = new OpenAiCompatVlmClient(vlm.url(), Duration.ofMillis(1));
+      long start = System.nanoTime();
+      assertThatThrownBy(() -> client.complete("m", "p", null, 10, Duration.ofMillis(500)))
+          .isInstanceOf(VlmException.class);
+      assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(4));
+      assertThat(vlm.calls.get()).as("a timeout is not retried").isEqualTo(1);
     }
   }
 

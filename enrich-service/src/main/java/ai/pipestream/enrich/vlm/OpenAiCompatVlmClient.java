@@ -1,5 +1,6 @@
 package ai.pipestream.enrich.vlm;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -7,11 +8,20 @@ import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * VLM client for any OpenAI-compatible chat-completions endpoint (llama.cpp's
@@ -24,12 +34,21 @@ import java.util.Set;
  * connections), with exponential backoff of 0.1s, 0.2s, 0.4s, 0.8s, 1.6s,
  * honoring a {@code Retry-After} header when present (clamped to the
  * per-call timeout, so a hostile or buggy endpoint cannot park a worker for
- * days). Other 4xx, per-request timeouts, and unparseable 200 bodies are not
- * retried. The caller's timeout bounds each attempt individually; retries
- * can add up to 5 extra attempts plus ~3.1s of backoff on top of one
- * timed-out attempt.
+ * days). Other 4xx, per-request timeouts, oversized bodies, and unparseable
+ * 200 bodies are not retried. The timeout bounds each attempt individually,
+ * response body included; retries can add up to 5 extra attempts plus ~3.1s
+ * of backoff on top of one timed-out attempt.
+ *
+ * <p><b>Bounded replies.</b> A reply is read into memory up to
+ * {@link #MAX_RESPONSE_BYTES} (a 4096-token answer is a few tens of KiB) and
+ * the exchange is cancelled past that, so an endpoint cannot stream
+ * gigabytes into the heap. An interrupt (the RPC was cancelled) aborts the
+ * exchange at once.
  */
 public final class OpenAiCompatVlmClient implements VlmClient {
+
+  /** Cap on one response body; far above any real chat-completions reply. */
+  public static final int MAX_RESPONSE_BYTES = 4 << 20;
 
   private static final int MAX_RETRIES = 5;
   private static final Duration DEFAULT_BASE_BACKOFF = Duration.ofMillis(100);
@@ -76,31 +95,69 @@ public final class OpenAiCompatVlmClient implements VlmClient {
                 requestBody(model, prompt, imageDataUri, maxTokens)))
             .build();
     for (int attempt = 0; ; attempt++) {
-      final HttpResponse<String> response;
+      final HttpResponse<byte[]> response;
       try {
-        response = http.send(request, HttpResponse.BodyHandlers.ofString());
-      } catch (InterruptedException interrupt) {
-        Thread.currentThread().interrupt();
-        throw new VlmException("interrupted waiting for the VLM endpoint", interrupt);
+        response = send(request, timeout);
       } catch (IOException failure) {
         if (attempt < MAX_RETRIES && isRetryable(failure)) {
           sleep(backoff(attempt));
           continue;
         }
         throw new VlmException("VLM endpoint call failed: " + failure.getMessage(), failure);
-      } catch (Exception failure) {
-        throw new VlmException("VLM endpoint call failed: " + failure.getMessage(), failure);
       }
+      String body = new String(response.body(), StandardCharsets.UTF_8);
       if (response.statusCode() != 200) {
         if (attempt < MAX_RETRIES && RETRYABLE_STATUSES.contains(response.statusCode())) {
           sleep(retryWait(response, attempt, timeout));
           continue;
         }
         throw new VlmException(
-            "VLM endpoint answered HTTP " + response.statusCode() + ": "
-                + snippet(response.body()));
+            "VLM endpoint answered HTTP " + response.statusCode() + ": " + snippet(body));
       }
-      return extractContent(response.body());
+      return extractContent(body);
+    }
+  }
+
+  /**
+   * One attempt under a hard deadline. The request timeout only covers the
+   * wait for the response headers, so a body that trickles in would
+   * otherwise hold the call (and its concurrency slot) for as long as the
+   * endpoint likes.
+   */
+  private HttpResponse<byte[]> send(HttpRequest request, Duration timeout)
+      throws IOException, VlmException {
+    CompletableFuture<HttpResponse<byte[]>> pending =
+        http.sendAsync(request, info -> new BoundedBody(MAX_RESPONSE_BYTES));
+    try {
+      return pending.get(nanos(timeout), TimeUnit.NANOSECONDS);
+    } catch (InterruptedException interrupt) {
+      pending.cancel(true);
+      Thread.currentThread().interrupt();
+      throw new VlmException("interrupted waiting for the VLM endpoint", interrupt);
+    } catch (TimeoutException late) {
+      pending.cancel(true);
+      throw new HttpTimeoutException("VLM endpoint did not finish answering in time");
+    } catch (ExecutionException failed) {
+      Throwable cause = failed.getCause();
+      while (cause instanceof CompletionException && cause.getCause() != null) {
+        cause = cause.getCause();
+      }
+      if (cause instanceof ResponseTooLarge) {
+        throw new VlmException(
+            "VLM response body exceeds the " + MAX_RESPONSE_BYTES + "-byte limit");
+      }
+      if (cause instanceof IOException io) {
+        throw io;
+      }
+      throw new VlmException("VLM endpoint call failed: " + cause.getMessage(), cause);
+    }
+  }
+
+  private static long nanos(Duration timeout) {
+    try {
+      return timeout.toNanos();
+    } catch (ArithmeticException huge) {
+      return Long.MAX_VALUE;
     }
   }
 
@@ -195,5 +252,65 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       return "";
     }
     return body.length() <= 200 ? body : body.substring(0, 200) + "...";
+  }
+
+  /** The body outgrew {@link #MAX_RESPONSE_BYTES}. */
+  private static final class ResponseTooLarge extends IOException {
+    ResponseTooLarge() {
+      super("response body over the limit");
+    }
+  }
+
+  /**
+   * Collects a response body up to {@code limit} bytes. One byte more
+   * cancels the subscription, which aborts the exchange, and fails the body.
+   */
+  private static final class BoundedBody implements HttpResponse.BodySubscriber<byte[]> {
+    private final CompletableFuture<byte[]> body = new CompletableFuture<>();
+    private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    private final int limit;
+    private Flow.Subscription subscription;
+
+    BoundedBody(int limit) {
+      this.limit = limit;
+    }
+
+    @Override
+    public CompletionStage<byte[]> getBody() {
+      return body;
+    }
+
+    @Override
+    public void onSubscribe(Flow.Subscription subscription) {
+      this.subscription = subscription;
+      subscription.request(Long.MAX_VALUE);
+    }
+
+    @Override
+    public void onNext(List<ByteBuffer> items) {
+      if (body.isDone()) {
+        return;
+      }
+      for (ByteBuffer item : items) {
+        if (item.remaining() > limit - buffer.size()) {
+          subscription.cancel();
+          body.completeExceptionally(new ResponseTooLarge());
+          return;
+        }
+        byte[] chunk = new byte[item.remaining()];
+        item.get(chunk);
+        buffer.write(chunk, 0, chunk.length);
+      }
+    }
+
+    @Override
+    public void onError(Throwable failure) {
+      body.completeExceptionally(failure);
+    }
+
+    @Override
+    public void onComplete() {
+      body.complete(buffer.toByteArray());
+    }
   }
 }
