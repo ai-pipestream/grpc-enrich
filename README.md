@@ -68,7 +68,10 @@ v1alpha).
   the first message carries `EnrichOptions` (one boolean per job:
   `do_picture_description`, `do_chart_extraction`, `do_code_enrichment`,
   `do_formula_enrichment`, enum presets with `*_raw` fallbacks, endpoint /
-  concurrency / timeout overrides) plus the document inline or as
+  concurrency / timeout overrides, and Docling's `picture_description_api`
+  extras as typed fields: `picture_description_prompt`,
+  `picture_description_params` (model, max_tokens, temperature, top_p, seed),
+  and `vlm_headers` for a per-request endpoint) plus the document inline or as
   `DocumentChunk` slices; `ItemImage` messages carry stripped crops, sent
   before the chunk marked complete (at most 100000, inside the byte cap).
   Events: `EnrichStarted` (counts selected), one `ItemAnnotation` or
@@ -153,10 +156,11 @@ does not re-run layout.
 
 Prompts are fixed per job. Picture description: `Describe this image in a few
 sentences.` (SmolVLM preset) or `What is shown in this image?` (Granite
-Vision preset). Chart, without `EnrichOptions.chart_extraction`: one call
-per chart, `Convert the information in this chart into a data table in CSV
-format.` Code and formula with an image crop: the bare `<code>` /
-`<formula>`.
+Vision preset), unless `picture_description_prompt` replaces it (Docling
+`picture_description_api.prompt`). Chart, without
+`EnrichOptions.chart_extraction`: one call per chart, `Convert the
+information in this chart into a data table in CSV format.` Code and
+formula with an image crop: the bare `<code>` / `<formula>`.
 
 Chart outputs (`EnrichOptions.chart_extraction`, the Docling chart stage).
 Three independent outputs, each its own VLM call per chart and its own event:
@@ -193,6 +197,10 @@ only when all its values are non-numeric; any non-numeric data cell is marked
 
 Generation budgets (`max_tokens`): description 200, code/formula 2048, chart
 4096 for every chart output (a wide table does not fit in 2048).
+`picture_description_params` (Docling `picture_description_api.params`, as
+typed fields) can name the description model and budget and add
+`temperature`, `top_p`, and `seed`; an unset field is not sent. They apply to
+picture descriptions only.
 
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
 retried up to 5 times with exponential backoff starting at 0.1s (a
@@ -232,7 +240,9 @@ untrusted:
   `ENRICH_VLM_ENDPOINT_ALLOWLIST`, the safer choice. This mirrors Docling's
   `enable_remote_services`.
 - **The operator's key stays with the operator's endpoint.**
-  `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`.
+  `ENRICH_VLM_API_KEY` is sent only to `ENRICH_VLM_URL`. A caller's
+  `vlm_headers` are sent only to the endpoint that caller named, never to
+  `ENRICH_VLM_URL`, and their values are never logged or echoed.
 - **No response echo.** A failure on a per-request endpoint is reported by
   HTTP status or failure type only, never with bytes that endpoint sent, so
   the service cannot be used to read pages from hosts the caller could not
@@ -241,6 +251,9 @@ untrusted:
   crops, the HTTP shim caps bodies before parsing, VLM replies are capped at
   4 MiB, VLM concurrency is capped process-wide, and a caller cannot raise
   the per-call timeout above the server's.
+- **The gRParse-to-enrich hop is plaintext gRPC.** `vlm_headers` (usually
+  credentials) cross it in clear text: keep the service on a trusted
+  network, or put TLS in front of it.
 
 ## Start here (humans and LLMs)
 

@@ -21,12 +21,16 @@ import ai.pipestream.enrich.v1.ItemAnnotation;
 import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.SkipReason;
+import ai.pipestream.enrich.v1.VlmGenerationParams;
+import ai.pipestream.enrich.v1.VlmHeader;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.Header;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
 import ai.pipestream.enrich.vlm.VlmClient.VlmRequest;
 import ai.pipestream.enrich.vlm.VlmEndpoint;
 import io.grpc.Status;
+import java.net.URI;
+import java.net.http.HttpRequest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -35,6 +39,7 @@ import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -60,7 +65,8 @@ import java.util.function.Consumer;
  *
  * <p><b>Endpoints and credentials.</b> {@link EndpointPolicy} decides whether
  * a request may name its own endpoint, and the operator's key is attached
- * only to the operator's endpoint. A failure on a caller-named endpoint is
+ * only to the operator's endpoint. A caller's {@code vlm_headers} go only to
+ * the endpoint the caller named. A failure on a caller-named endpoint is
  * reported by its safe message, never with bytes that endpoint sent.
  *
  * <p><b>Cancellation.</b> {@link Cancellation#cancel()} interrupts every VLM
@@ -68,6 +74,20 @@ import java.util.function.Consumer;
  * so a client that went away stops costing VLM capacity.
  */
 public final class EnrichmentEngine {
+
+  /** Most vlm_headers one request may carry. */
+  static final int MAX_HEADERS = 32;
+  /** Longest vlm_headers name, in characters. */
+  static final int MAX_HEADER_NAME_CHARS = 256;
+  /** Longest vlm_headers value, in characters. */
+  static final int MAX_HEADER_VALUE_CHARS = 8192;
+
+  /**
+   * Header names a caller may not set: the ones this client sets itself
+   * (Content-Type, the framing headers), the target host, and the hop-by-hop
+   * headers, which describe a connection rather than the request.
+   */
+  private static final Set<String> RESERVED_HEADERS = reservedHeaders();
 
   private final VlmClient.Factory clientFactory;
   private final EndpointPolicy endpoints;
@@ -120,13 +140,15 @@ public final class EnrichmentEngine {
   }
 
   /**
-   * Checks {@code options} against this server's endpoint policy before any
-   * work starts. Returns {@link Status#OK}, PERMISSION_DENIED for a
-   * per-request endpoint the operator has not allowed, or INVALID_ARGUMENT
-   * for one that is not a usable URL.
+   * Checks {@code options} against this server's endpoint policy and the
+   * rules for headers and generation parameters, before any work starts.
+   * Returns {@link Status#OK}, PERMISSION_DENIED for a per-request endpoint
+   * the operator has not allowed, or INVALID_ARGUMENT. A description never
+   * repeats a header value.
    */
   public Status validate(EnrichOptions options) {
-    for (String endpoint : requestEndpoints(options)) {
+    List<String> requested = requestEndpoints(options);
+    for (String endpoint : requested) {
       try {
         VlmEndpoint.completionsUri(endpoint);
       } catch (IllegalArgumentException unusable) {
@@ -141,7 +163,20 @@ public final class EnrichmentEngine {
                 + " ENRICH_VLM_ENDPOINT_ALLOWLIST");
       }
     }
-    return Status.OK;
+    if (options.getVlmHeadersCount() > 0) {
+      if (requested.isEmpty()) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers are sent only to a per-request endpoint (vlm_endpoint or"
+                + " chart_extraction.vlm_endpoint), and none is set");
+      }
+      Status headers = validateHeaders(options.getVlmHeadersList());
+      if (!headers.isOk()) {
+        return headers;
+      }
+    }
+    return options.hasPictureDescriptionParams()
+        ? validateParams(options.getPictureDescriptionParams())
+        : Status.OK;
   }
 
   /** The non-empty endpoints a request names for its own calls. */
@@ -154,6 +189,96 @@ public final class EnrichmentEngine {
       requested.add(options.getChartExtraction().getVlmEndpoint());
     }
     return requested;
+  }
+
+  private static Status validateHeaders(List<VlmHeader> headers) {
+    if (headers.size() > MAX_HEADERS) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "vlm_headers carries " + headers.size() + " headers; at most " + MAX_HEADERS
+              + " are allowed");
+    }
+    for (int i = 0; i < headers.size(); i++) {
+      String name = headers.get(i).getName();
+      String value = headers.get(i).getValue();
+      if (name.isEmpty() || name.length() > MAX_HEADER_NAME_CHARS || !isToken(name)) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers[" + i + "] has an invalid header name");
+      }
+      if (RESERVED_HEADERS.contains(name)) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers[" + i + "] sets " + name + ", which this server does not let a caller"
+                + " set");
+      }
+      if (value.length() > MAX_HEADER_VALUE_CHARS || !isHeaderValue(value)
+          || !jdkAccepts(name, value)) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "vlm_headers[" + i + "] (" + name + ") has a value HTTP does not allow, or one"
+                + " longer than " + MAX_HEADER_VALUE_CHARS + " characters");
+      }
+    }
+    return Status.OK;
+  }
+
+  private static Status validateParams(VlmGenerationParams params) {
+    if (params.hasMaxTokens() && params.getMaxTokens() == 0) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "picture_description_params.max_tokens must be positive");
+    }
+    if (params.hasTemperature()
+        && !(Double.isFinite(params.getTemperature()) && params.getTemperature() >= 0.0)) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "picture_description_params.temperature must be a finite, non-negative number");
+    }
+    if (params.hasTopP()
+        && !(Double.isFinite(params.getTopP())
+            && params.getTopP() >= 0.0 && params.getTopP() <= 1.0)) {
+      return Status.INVALID_ARGUMENT.withDescription(
+          "picture_description_params.top_p must be between 0 and 1");
+    }
+    return Status.OK;
+  }
+
+  /** An RFC 9110 token: the characters an HTTP field name may use. */
+  private static boolean isToken(String name) {
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      boolean alphanumeric = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+          || (c >= '0' && c <= '9');
+      if (!alphanumeric && "!#$%&'*+-.^_`|~".indexOf(c) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Visible ASCII, space, tab, and obs-text; never CR, LF, NUL, or DEL. */
+  private static boolean isHeaderValue(String value) {
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      if (c != '\t' && (c < 0x20 || c == 0x7f || c > 0xff)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Whether the JDK HttpClient takes this header. Checked up front because
+   * the JDK's own refusal message repeats the value. */
+  private static boolean jdkAccepts(String name, String value) {
+    try {
+      HttpRequest.newBuilder(URI.create("http://localhost/")).header(name, value);
+      return true;
+    } catch (IllegalArgumentException refused) {
+      return false;
+    }
+  }
+
+  private static Set<String> reservedHeaders() {
+    Set<String> reserved = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    reserved.addAll(List.of("content-type", "content-length", "host", "expect", "connection",
+        "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te",
+        "trailer", "transfer-encoding", "upgrade"));
+    return reserved;
   }
 
   /**
@@ -250,7 +375,9 @@ public final class EnrichmentEngine {
         options.getTimeoutSeconds() == 0 || requestedTimeout.compareTo(defaultTimeout) > 0
             ? defaultTimeout
             : requestedTimeout;
-
+    List<Header> callerHeaders = options.getVlmHeadersList().stream()
+        .map(header -> new Header(header.getName(), header.getValue()))
+        .toList();
     List<Header> operatorHeaders = endpoints.defaultApiKey().isEmpty()
         ? List.of()
         : List.of(new Header("Authorization", "Bearer " + endpoints.defaultApiKey()));
@@ -281,9 +408,8 @@ public final class EnrichmentEngine {
         skipped.incrementAndGet();
         emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_VLM_ERROR, refusal));
       } else {
-        // Only the operator's endpoint gets the operator's key.
         runnable.add(new Call(item, client, callerChosen,
-            callerChosen ? List.of() : operatorHeaders));
+            callerChosen ? callerHeaders : operatorHeaders));
       }
     }
     if (!runnable.isEmpty()) {
@@ -361,9 +487,18 @@ public final class EnrichmentEngine {
       ConcurrentLinkedQueue<EnrichedItem> enriched) {
     WorkItem item = call.item();
     try {
-      String content = call.client().complete(new VlmRequest(item.model(), item.prompt(),
-          item.image(), item.maxTokens(), OptionalDouble.empty(), OptionalDouble.empty(),
-          OptionalLong.empty(), call.headers(), timeout));
+      VlmGenerationParams sampling = item.sampling();
+      String content = call.client().complete(new VlmRequest(
+          item.model(),
+          item.prompt(),
+          item.image(),
+          item.maxTokens(),
+          sampling.hasTemperature()
+              ? OptionalDouble.of(sampling.getTemperature()) : OptionalDouble.empty(),
+          sampling.hasTopP() ? OptionalDouble.of(sampling.getTopP()) : OptionalDouble.empty(),
+          sampling.hasSeed() ? OptionalLong.of(sampling.getSeed()) : OptionalLong.empty(),
+          call.headers(),
+          timeout));
       ItemAnnotation.Builder annotation = ItemAnnotation.newBuilder()
           .setSelfRef(item.selfRef())
           .setModel(item.model());

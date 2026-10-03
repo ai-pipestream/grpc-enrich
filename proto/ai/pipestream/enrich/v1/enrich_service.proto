@@ -126,6 +126,58 @@ message EnrichOptions {
   // the Docling chart stage: one VLM call per enabled output, each with its
   // own prompt and post-processing, each answered by its own event.
   ChartExtractionOptions chart_extraction = 17;
+  // Prompt for the picture-description calls (Docling
+  // picture_description_api.prompt). Non-empty replaces the preset's fixed
+  // prompt; empty keeps it. Chart, code, and formula prompts are unaffected.
+  string picture_description_prompt = 18;
+  // Generation parameters for the picture-description calls (Docling
+  // picture_description_api.params, as typed fields). Absent keeps the
+  // preset model and the 200-token budget, and leaves sampling to the
+  // endpoint.
+  VlmGenerationParams picture_description_params = 19;
+  // HTTP headers sent on every call to a per-request endpoint (vlm_endpoint
+  // or chart_extraction.vlm_endpoint), for example the caller's own
+  // Authorization for that endpoint (Docling picture_description_api.headers).
+  // Never sent to the server's default endpoint (ENRICH_VLM_URL), never
+  // logged, never echoed. Headers without a per-request endpoint, or with a
+  // name or value HTTP does not allow, are INVALID_ARGUMENT.
+  repeated VlmHeader vlm_headers = 20;
+}
+
+// Typed generation parameters for one job's OpenAI-compatible
+// chat-completions calls: the part of Docling's free-form params dict this
+// service sends. Every field is optional; an unset field is not sent (or
+// keeps the job's default), so the endpoint's own default applies.
+message VlmGenerationParams {
+  // Model name sent as "model". Non-empty overrides the job's preset and
+  // *_raw model name.
+  string model = 1;
+  // Generation cap sent as "max_tokens". Unset keeps the job's budget (200
+  // for picture descriptions); zero is INVALID_ARGUMENT.
+  optional uint32 max_tokens = 2;
+  // Sampling temperature sent as "temperature". Must be finite and not
+  // negative (INVALID_ARGUMENT otherwise).
+  optional double temperature = 3;
+  // Nucleus-sampling probability mass sent as "top_p". Must be between 0
+  // and 1 (INVALID_ARGUMENT otherwise).
+  optional double top_p = 4;
+  // Sampling seed sent as "seed", for repeatable output on endpoints that
+  // support it.
+  optional int64 seed = 5;
+}
+
+// One HTTP request header for the calls to a per-request VLM endpoint.
+message VlmHeader {
+  // Header name, for example "Authorization". Must be an HTTP token; Host,
+  // Content-Type, Content-Length, Expect, and the hop-by-hop names
+  // (Connection, Keep-Alive, Proxy-*, TE, Trailer, Transfer-Encoding,
+  // Upgrade) are INVALID_ARGUMENT.
+  string name = 1;
+  // Header value, typically a credential. Marked debug_redact, so
+  // protobuf's redacting debug printers (DebugFormat in Java, AbslStringify
+  // in C++) print it as [REDACTED]; this service never logs or echoes it.
+  // CR, LF, and other control characters are INVALID_ARGUMENT.
+  string value = 2 [debug_redact = true];
 }
 
 // The Docling chart-extraction stage (ChartExtractionVlmEngineOptions) as

@@ -16,6 +16,7 @@ import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.v1.ItemImage;
 import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.SkipReason;
+import ai.pipestream.enrich.v1.VlmGenerationParams;
 import ai.pipestream.enrich.vlm.VlmClient.VlmImage;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,7 +32,8 @@ import java.util.Set;
  *
  * <p>Selection rules: the area threshold defaults to 0.05 of the page area,
  * prompts are fixed per preset (SmolVLM / Granite Vision / chart2csv /
- * CodeFormula), and a picture is a chart when its top figure-class
+ * CodeFormula) except that a request may replace the picture-description
+ * prompt, model, and budget, and a picture is a chart when its top figure-class
  * prediction is one of the supported chart types (bar_chart, pie_chart,
  * line_chart) or the picture carries the label DOC_ITEM_LABEL_CHART.
  */
@@ -50,7 +52,9 @@ public final class ItemSelector {
    * names which (UNSPECIFIED for every other kind). {@code endpoint} is the
    * per-item endpoint override, or null for the request's endpoint.
    * {@code image} is null for a text-only call; a crop stays raw bytes here
-   * and is encoded only when its own call is made. */
+   * and is encoded only when its own call is made. {@code sampling} carries
+   * the temperature, top_p, and seed to send (the default instance sends
+   * none). */
   public record WorkItem(
       String selfRef,
       Kind kind,
@@ -58,16 +62,17 @@ public final class ItemSelector {
       String prompt,
       VlmImage image,
       String text,
-      int maxTokens,
+      long maxTokens,
       int pictureIndex,
       int textIndex,
       ChartOutput chartOutput,
-      String endpoint) {
+      String endpoint,
+      VlmGenerationParams sampling) {
 
     WorkItem(String selfRef, Kind kind, String model, String prompt, VlmImage image,
-        String text, int maxTokens, int pictureIndex, int textIndex) {
+        String text, long maxTokens, int pictureIndex, int textIndex) {
       this(selfRef, kind, model, prompt, image, text, maxTokens, pictureIndex, textIndex,
-          ChartOutput.CHART_OUTPUT_UNSPECIFIED, null);
+          ChartOutput.CHART_OUTPUT_UNSPECIFIED, null, VlmGenerationParams.getDefaultInstance());
     }
   }
 
@@ -168,8 +173,7 @@ public final class ItemSelector {
       if (chartJob) {
         addChartWork(work, selfRef, image, i, options);
       } else {
-        work.add(new WorkItem(selfRef, Kind.DESCRIPTION, descriptionModel(options),
-            describePrompt(options), image, null, MAX_TOKENS_DESCRIPTION, i, -1));
+        work.add(descriptionWork(selfRef, image, i, options));
       }
     }
 
@@ -207,6 +211,24 @@ public final class ItemSelector {
     return new Selection(work, skips);
   }
 
+  /** A picture-description call: the preset's model, prompt, and budget,
+   * each replaced by the caller's picture_description_prompt /
+   * picture_description_params when set (Docling picture_description_api
+   * prompt and params), plus the caller's sampling parameters. */
+  private static WorkItem descriptionWork(
+      String selfRef, VlmImage image, int pictureIndex, EnrichOptions options) {
+    VlmGenerationParams params = options.getPictureDescriptionParams();
+    String model = params.getModel().isEmpty() ? descriptionModel(options) : params.getModel();
+    String prompt = options.getPictureDescriptionPrompt().isEmpty()
+        ? describePrompt(options)
+        : options.getPictureDescriptionPrompt();
+    long maxTokens = params.hasMaxTokens()
+        ? Integer.toUnsignedLong(params.getMaxTokens())
+        : MAX_TOKENS_DESCRIPTION;
+    return new WorkItem(selfRef, Kind.DESCRIPTION, model, prompt, image, null, maxTokens,
+        pictureIndex, -1, ChartOutput.CHART_OUTPUT_UNSPECIFIED, null, params);
+  }
+
   /** One work item per enabled chart output, in Docling's order (csv,
    * summary, code). Without ChartExtractionOptions: the original single CSV
    * call with its original prompt. */
@@ -215,7 +237,8 @@ public final class ItemSelector {
       EnrichOptions options) {
     if (!options.hasChartExtraction()) {
       work.add(new WorkItem(selfRef, Kind.CHART, chartModel(options), CHART_PROMPT, image,
-          null, MAX_TOKENS_CHART, pictureIndex, -1, ChartOutput.CHART_OUTPUT_CSV, null));
+          null, MAX_TOKENS_CHART, pictureIndex, -1, ChartOutput.CHART_OUTPUT_CSV, null,
+          VlmGenerationParams.getDefaultInstance()));
       return;
     }
     ChartExtractionOptions chart = options.getChartExtraction();
@@ -224,7 +247,8 @@ public final class ItemSelector {
     boolean natural = chart.getNaturalLanguagePrompts();
     for (ChartOutput output : enabledChartOutputs(chart)) {
       work.add(new WorkItem(selfRef, Kind.CHART, model, chartPrompt(output, natural), image,
-          null, MAX_TOKENS_CHART, pictureIndex, -1, output, endpoint));
+          null, MAX_TOKENS_CHART, pictureIndex, -1, output, endpoint,
+          VlmGenerationParams.getDefaultInstance()));
     }
   }
 
