@@ -52,7 +52,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
 | `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
-| `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
+| `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Process-wide cap on concurrent VLM calls, shared by every request; also bounds `EnrichOptions.concurrency` |
 | `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included), and the ceiling on `EnrichOptions.timeout_seconds` |
 | `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables |
 
@@ -76,8 +76,8 @@ v1alpha).
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
   VLM call is an `ItemSkipped` (`SKIP_REASON_VLM_ERROR`), never an RPC error.
 - `GetServiceInfo`: versions, the default endpoint's origin, byte cap,
-  concurrency cap, and the `UiInfo` frontend advertisement (tab title/path/
-  tooltip) shared with the other ai-pipestream services.
+  process-wide concurrency cap, and the `UiInfo` frontend advertisement (tab
+  title/path/tooltip) shared with the other ai-pipestream services.
 
 `ai/pipestream/document/v1/document.proto` is vendored verbatim from gRParse
 (the canonical copy); do not edit it here.
@@ -237,6 +237,10 @@ untrusted:
   HTTP status or failure type only, never with bytes that endpoint sent, so
   the service cannot be used to read pages from hosts the caller could not
   reach itself. Failures on `ENRICH_VLM_URL` keep the endpoint's error text.
+- **Bounded memory and work.** The byte cap covers inline documents and
+  crops, the HTTP shim caps bodies before parsing, VLM replies are capped at
+  4 MiB, VLM concurrency is capped process-wide, and a caller cannot raise
+  the per-call timeout above the server's.
 
 ## Start here (humans and LLMs)
 

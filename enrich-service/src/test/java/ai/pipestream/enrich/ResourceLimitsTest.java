@@ -23,6 +23,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -33,9 +34,9 @@ import org.junit.jupiter.api.Test;
 /**
  * Memory and work bounds: the byte cap covers inline documents and crops as
  * well as chunks, crops are capped in count and refused after enrichment
- * started, the HTTP shim bounds request bodies before parsing, and a caller
- * cannot raise the per-call timeout (or with it the Retry-After clamp) above
- * the server's.
+ * started, the HTTP shim bounds request bodies before parsing, the VLM
+ * concurrency cap is process-wide, and a caller cannot raise the per-call
+ * timeout (or with it the Retry-After clamp) above the server's.
  */
 class ResourceLimitsTest {
 
@@ -262,6 +263,49 @@ class ResourceLimitsTest {
       assertThat(response.statusCode()).as("%s", response.body()).isEqualTo(413);
       assertThat(response.body()).contains("byte cap");
       assertThat(vlm.calls()).isZero();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Process-wide VLM concurrency
+  // -------------------------------------------------------------------------
+
+  @Test
+  void vlmConcurrencyCap_isSharedByEveryRequest() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer();
+        InProcessEnrich enrich = InProcessEnrich.start(EndpointPolicy.defaultOnly(vlm.url()),
+            2, 2, Duration.ofSeconds(10), 64L * 1024 * 1024)) {
+      CountDownLatch release = new CountDownLatch(1);
+      Map<Integer, CountDownLatch> gates = new HashMap<>();
+      for (int call = 1; call <= 6; call++) {
+        gates.put(call, release);
+      }
+      vlm.gates = gates;
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setConcurrency(2)
+          .setDocument(InProcessEnrich.pictures(3))
+          .build();
+      // Two documents at once, each allowed two calls of its own.
+      List<BlockingQueue<Object>> inboxes = List.of(new LinkedBlockingQueue<>(),
+          new LinkedBlockingQueue<>());
+      for (BlockingQueue<Object> inbox : inboxes) {
+        StreamObserver<EnrichDocumentRequest> requester =
+            enrich.stub.enrichDocument(InProcessEnrich.inbox(inbox));
+        requester.onNext(InProcessEnrich.options(options));
+        requester.onCompleted();
+      }
+
+      await().atMost(Duration.ofSeconds(10)).until(() -> vlm.calls() == 2);
+      await().during(Duration.ofMillis(500)).atMost(Duration.ofSeconds(2))
+          .until(() -> vlm.calls() == 2);
+      release.countDown();
+      for (BlockingQueue<Object> inbox : inboxes) {
+        Collected result = InProcessEnrich.collect(inbox);
+        assertThat(result.error()).isNull();
+        assertThat(result.annotations()).hasSize(3);
+      }
+      assertThat(vlm.calls()).isEqualTo(6);
     }
   }
 

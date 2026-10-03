@@ -28,8 +28,9 @@ import java.util.Set;
  *     comma-separated, for example {@code https://vlm.internal:8443})
  * @param maxDocumentBytes byte cap on a document plus its crops
  *     (ENRICH_MAX_DOCUMENT_MIB)
- * @param maxConcurrentVlm cap on concurrent VLM calls per request
- *     (ENRICH_MAX_CONCURRENT_VLM; defaults to cores, min 2)
+ * @param maxConcurrentVlm process-wide cap on concurrent VLM calls, which
+ *     also bounds each request (ENRICH_MAX_CONCURRENT_VLM; defaults to
+ *     cores, min 2)
  * @param vlmTimeout per-VLM-call timeout, and the ceiling on a request's own
  *     (ENRICH_VLM_TIMEOUT_SECONDS)
  * @param metricsInterval metrics line interval; zero disables

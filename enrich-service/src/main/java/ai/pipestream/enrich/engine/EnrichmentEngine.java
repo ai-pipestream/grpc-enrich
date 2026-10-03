@@ -52,6 +52,12 @@ import java.util.function.Consumer;
  * they exist, never buffered into a batch; out-of-order across items is
  * legal. A failed VLM call skips its item and never fails the RPC.
  *
+ * <p><b>Concurrency.</b> {@code maxConcurrency} is a process-wide cap: one
+ * fair semaphore shared by every request bounds the VLM calls in flight, so
+ * N concurrent documents cannot put N times the cap on the VLM server (and
+ * multiply it again with retries exactly when it pushes back). A request's
+ * own {@code concurrency} is a sub-limit inside that cap.
+ *
  * <p><b>Endpoints and credentials.</b> {@link EndpointPolicy} decides whether
  * a request may name its own endpoint, and the operator's key is attached
  * only to the operator's endpoint. A failure on a caller-named endpoint is
@@ -69,6 +75,9 @@ public final class EnrichmentEngine {
   private final int maxConcurrency;
   private final Duration defaultTimeout;
   private final ExecutorService executor;
+  /** Process-wide VLM call slots, shared by every enrichment. Fair, so a
+   * request that queued first is served first. */
+  private final Semaphore processSlots;
 
   /** An engine whose only endpoint is {@code defaultEndpoint}: no key, and
    * per-request endpoints refused. */
@@ -87,6 +96,10 @@ public final class EnrichmentEngine {
    * An engine that reaches the endpoints {@code endpoints} allows.
    *
    * @param endpoints which endpoints requests may reach, and the operator's key
+   * @param defaultConcurrency per-request VLM concurrency when the request
+   *     names none
+   * @param maxConcurrency the process-wide cap on in-flight VLM calls, which
+   *     also bounds each request's concurrency
    * @param defaultTimeout per-call timeout when the request names none, and
    *     the ceiling on the one it names
    */
@@ -103,6 +116,7 @@ public final class EnrichmentEngine {
     this.maxConcurrency = maxConcurrency;
     this.defaultTimeout = defaultTimeout;
     this.executor = executor;
+    this.processSlots = new Semaphore(Math.max(1, maxConcurrency), true);
   }
 
   /**
@@ -280,8 +294,13 @@ public final class EnrichmentEngine {
           try {
             requestSlots.acquire();
             try {
-              if (!cancellation.isCancelled()) {
-                runItem(call, timeout, emit, succeeded, skipped, failed, enriched);
+              processSlots.acquire();
+              try {
+                if (!cancellation.isCancelled()) {
+                  runItem(call, timeout, emit, succeeded, skipped, failed, enriched);
+                }
+              } finally {
+                processSlots.release();
               }
             } finally {
               requestSlots.release();

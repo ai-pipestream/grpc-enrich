@@ -414,7 +414,8 @@ message GetServiceInfoResponse {
   // The byte cap on the document plus its ItemImage crops
   // (RESOURCE_EXHAUSTED above it).
   uint64 max_document_bytes = 4;
-  // The server-wide cap on concurrent VLM calls per request.
+  // The process-wide cap on concurrent VLM calls, shared by every request;
+  // it also bounds EnrichOptions.concurrency.
   uint32 max_concurrent_vlm_calls = 5;
   // Frontend advertisement for the shared demo shell.
   UiInfo ui = 6;
