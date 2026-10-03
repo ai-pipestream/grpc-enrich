@@ -448,8 +448,7 @@ enum CodeFormulaPreset {
 }
 
 // Empty request for capability discovery.
-message GetServiceInfoRequest {
-}
+message GetServiceInfoRequest {}
 
 // Server identity and operational limits, for capability discovery.
 message GetServiceInfoResponse {

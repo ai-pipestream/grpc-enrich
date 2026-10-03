@@ -22,6 +22,8 @@ jobs:
           setup_only: true
       - name: buf lint
         run: buf lint
+      - name: buf format
+        run: buf format -d --exit-code
       # Contract evolution is guarded against main: changes must be additive.
       - name: buf breaking
         if: github.event_name == 'pull_request'
