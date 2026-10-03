@@ -34,9 +34,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -52,6 +56,10 @@ import java.util.function.Consumer;
  * a request may name its own endpoint, and the operator's key is attached
  * only to the operator's endpoint. A failure on a caller-named endpoint is
  * reported by its safe message, never with bytes that endpoint sent.
+ *
+ * <p><b>Cancellation.</b> {@link Cancellation#cancel()} interrupts every VLM
+ * call the enrichment has in flight and stops the queued ones from starting,
+ * so a client that went away stops costing VLM capacity.
  */
 public final class EnrichmentEngine {
 
@@ -79,6 +87,8 @@ public final class EnrichmentEngine {
    * An engine that reaches the endpoints {@code endpoints} allows.
    *
    * @param endpoints which endpoints requests may reach, and the operator's key
+   * @param defaultTimeout per-call timeout when the request names none, and
+   *     the ceiling on the one it names
    */
   public EnrichmentEngine(
       VlmClient.Factory clientFactory,
@@ -133,6 +143,40 @@ public final class EnrichmentEngine {
   }
 
   /**
+   * Stops one enrichment. {@link #cancel()} marks it cancelled and interrupts
+   * every VLM call it has in flight; calls not yet started never start, and
+   * no trailer is emitted. Safe from any thread, any number of times, before
+   * or after the enrichment starts.
+   */
+  public static final class Cancellation {
+    private final Set<Future<?>> inFlight = ConcurrentHashMap.newKeySet();
+    private volatile boolean cancelled;
+
+    public void cancel() {
+      cancelled = true;
+      for (Future<?> call : inFlight) {
+        call.cancel(true);
+      }
+    }
+
+    public boolean isCancelled() {
+      return cancelled;
+    }
+
+    /** Registers a call; one registered after cancel() is cancelled at once. */
+    private void track(Future<?> call) {
+      inFlight.add(call);
+      if (cancelled) {
+        call.cancel(true);
+      }
+    }
+
+    private void forget(Future<?> call) {
+      inFlight.remove(call);
+    }
+  }
+
+  /**
    * Enriches {@code document}, pushing every event to {@code emit} as it is
    * produced. {@code emit} must be thread-safe: item events arrive from
    * worker threads. Returns after the EnrichComplete trailer has been
@@ -143,6 +187,20 @@ public final class EnrichmentEngine {
       Map<String, ItemImage> crops,
       EnrichOptions options,
       Consumer<EnrichDocumentResponse> emit) {
+    enrich(document, crops, options, emit, new Cancellation());
+  }
+
+  /**
+   * {@link #enrich(Document, Map, EnrichOptions, Consumer)} that stops when
+   * {@code cancellation} is cancelled: in-flight VLM calls are interrupted,
+   * queued ones never start, and it returns without a trailer.
+   */
+  public void enrich(
+      Document document,
+      Map<String, ItemImage> crops,
+      EnrichOptions options,
+      Consumer<EnrichDocumentResponse> emit,
+      Cancellation cancellation) {
     Selection selection = ItemSelector.select(document, crops, options);
     emit.accept(event(EnrichStarted.newBuilder()
         .setPictureDescriptions((int) selection.count(Kind.DESCRIPTION))
@@ -163,17 +221,21 @@ public final class EnrichmentEngine {
 
     // Both fields are uint32 on the wire; Java surfaces values above 2^31 as
     // negative ints. A wrapped concurrency is above the cap, so clamp to it;
-    // a wrapped timeout must be widened back to its unsigned value or the
-    // negative Duration would fail every VLM call.
+    // a wrapped timeout is widened back to its unsigned value. Either way the
+    // server's own timeout is the ceiling: a caller can shorten it, never
+    // lengthen it (it also bounds every Retry-After wait).
     int requestedConcurrency = options.getConcurrency();
     int concurrency = requestedConcurrency == 0
         ? defaultConcurrency
         : requestedConcurrency < 0
             ? maxConcurrency
             : Math.min(requestedConcurrency, maxConcurrency);
-    Duration timeout = options.getTimeoutSeconds() == 0
-        ? defaultTimeout
-        : Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
+    Duration requestedTimeout =
+        Duration.ofSeconds(Integer.toUnsignedLong(options.getTimeoutSeconds()));
+    Duration timeout =
+        options.getTimeoutSeconds() == 0 || requestedTimeout.compareTo(defaultTimeout) > 0
+            ? defaultTimeout
+            : requestedTimeout;
 
     List<Header> operatorHeaders = endpoints.defaultApiKey().isEmpty()
         ? List.of()
@@ -211,30 +273,42 @@ public final class EnrichmentEngine {
       }
     }
     if (!runnable.isEmpty()) {
-      Semaphore slots = new Semaphore(Math.max(1, concurrency));
-      CountDownLatch done = new CountDownLatch(runnable.size());
+      Semaphore requestSlots = new Semaphore(Math.max(1, concurrency));
+      List<Future<?>> calls = new ArrayList<>(runnable.size());
       for (Call call : runnable) {
-        executor.execute(() -> {
+        Future<?> future = executor.submit(() -> {
           try {
-            slots.acquire();
+            requestSlots.acquire();
             try {
-              runItem(call, timeout, emit, succeeded, skipped, failed, enriched);
+              if (!cancellation.isCancelled()) {
+                runItem(call, timeout, emit, succeeded, skipped, failed, enriched);
+              }
             } finally {
-              slots.release();
+              requestSlots.release();
             }
           } catch (InterruptedException interrupt) {
             Thread.currentThread().interrupt();
             failed.incrementAndGet();
-          } finally {
-            done.countDown();
           }
         });
+        cancellation.track(future);
+        calls.add(future);
       }
-      try {
-        done.await();
-      } catch (InterruptedException interrupt) {
-        Thread.currentThread().interrupt();
+      for (Future<?> future : calls) {
+        try {
+          future.get();
+        } catch (CancellationException | ExecutionException ended) {
+          // Cancelled with the RPC, or failed past runItem's own handling;
+          // either way nothing is left to wait for.
+        } catch (InterruptedException interrupt) {
+          Thread.currentThread().interrupt();
+          cancellation.cancel();
+        }
+        cancellation.forget(future);
       }
+    }
+    if (cancellation.isCancelled()) {
+      return;
     }
 
     EnrichComplete.Builder complete = EnrichComplete.newBuilder()

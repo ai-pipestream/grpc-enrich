@@ -109,7 +109,8 @@ message EnrichOptions {
   // server's configured default; values above the server cap are clamped.
   uint32 concurrency = 13;
   // Per-VLM-call timeout in seconds. Zero uses the server's configured
-  // default.
+  // default (ENRICH_VLM_TIMEOUT_SECONDS), which is also the ceiling: larger
+  // values are clamped to it.
   uint32 timeout_seconds = 14;
   // When true, EnrichComplete carries a full copy of the document with the
   // emitted annotations applied. Unary convenience only; the event stream is

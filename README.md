@@ -53,7 +53,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Cap on concurrent VLM calls per request |
-| `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included) |
+| `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included), and the ceiling on `EnrichOptions.timeout_seconds` |
 | `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables |
 
 The server registers `grpc.health.v1.Health` and server reflection (v1 and
@@ -118,7 +118,9 @@ parsed (from `Content-Length` when present, without reading the body).
   (`application/x-ndjson`): each `EnrichDocumentResponse` is written as one
   flushed line the moment the stream produces it, so HTTP callers see the
   same live per-item events gRPC clients get. A mid-stream failure ends the
-  response with a final `{"error": "..."}` line.
+  response with a final `{"error": "..."}` line. When the client hangs up,
+  the next event write fails and the call is cancelled, so its VLM calls
+  stop.
 - `GET /healthz`: `200 ok` when the server is up.
 
 ```sh
@@ -193,11 +195,14 @@ Generation budgets (`max_tokens`): description 200, code/formula 2048, chart
 4096 for every chart output (a wide table does not fit in 2048).
 
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
-retried up to 5 times with exponential backoff starting at 0.1s, then the
-item is skipped with `SKIP_REASON_VLM_ERROR` rather than failing the RPC. A
-reply larger than 4 MiB, or one that does not finish within the per-call
-timeout, is a skip too. Every skip carries an explicit reason, and
-description annotations record the model name as provenance.
+retried up to 5 times with exponential backoff starting at 0.1s (a
+`Retry-After` is honored up to the per-call timeout), then the item is
+skipped with `SKIP_REASON_VLM_ERROR` rather than failing the RPC. A reply
+larger than 4 MiB, or one that does not finish within the per-call timeout,
+is a skip too. Every skip carries an explicit reason, and description
+annotations record the model name as provenance. A cancelled call (client
+cancel, expired deadline, failed RPC) interrupts its VLM calls in flight and
+starts no more.
 
 ## VLM endpoint URLs
 

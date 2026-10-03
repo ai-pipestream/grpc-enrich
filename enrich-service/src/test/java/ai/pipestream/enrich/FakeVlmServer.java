@@ -56,6 +56,8 @@ final class FakeVlmServer implements AutoCloseable {
   /** When non-null, the exact body of every 200 reply, instead of a
    * chat-completions envelope around the responder's content. */
   volatile String rawOkBody;
+  /** When non-null, sent as Retry-After with every non-200 reply. */
+  volatile String retryAfter;
 
   FakeVlmServer() {
     try {
@@ -85,6 +87,9 @@ final class FakeVlmServer implements AutoCloseable {
         response = ("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":"
                 + Json.quote(responder.apply(body)) + "}}]}")
             .getBytes(StandardCharsets.UTF_8);
+      }
+      if (code != 200 && retryAfter != null) {
+        exchange.getResponseHeaders().set("Retry-After", retryAfter);
       }
       exchange.sendResponseHeaders(code, response.length);
       try (OutputStream out = exchange.getResponseBody()) {

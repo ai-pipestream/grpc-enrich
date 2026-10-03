@@ -15,6 +15,7 @@ import ai.pipestream.enrich.vlm.VlmEndpoint;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import java.util.HashMap;
 import java.util.Map;
@@ -34,6 +35,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * document, inline or assembled from chunks, plus its ItemImage crops, and
  * at most {@link #MAX_CROPS} crops. Crops after enrichment started are a
  * protocol error rather than bytes held for nothing.
+ *
+ * <p><b>Cancellation.</b> A client cancel or an expired deadline cancels the
+ * enrichment: in-flight VLM calls are interrupted and queued ones never
+ * start, instead of running to completion with their events dropped.
  */
 public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImplBase {
 
@@ -79,6 +84,8 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
       StreamObserver<EnrichDocumentResponse> responseObserver) {
     return new StreamObserver<>() {
       private final Object sendLock = new Object();
+      private final EnrichmentEngine.Cancellation cancellation =
+          new EnrichmentEngine.Cancellation();
       // A ByteString rope: concat is cheap and parseFrom reads it directly,
       // so chunked uploads are never copied into an intermediate array.
       private ByteString chunks = ByteString.EMPTY;
@@ -87,7 +94,18 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
       private long cropBytes;
       private EnrichOptions options;
       private boolean started;
-      private boolean terminated;
+      // Written under sendLock; volatile so onNext sees a cancel at once.
+      private volatile boolean terminated;
+
+      {
+        // grpc-java only tells a handler about a cancel or an expired
+        // deadline through this callback once the client has half-closed
+        // (onError is not called then), and it may only be registered
+        // before this observer is returned.
+        if (responseObserver instanceof ServerCallStreamObserver<EnrichDocumentResponse> call) {
+          call.setOnCancelHandler(this::cancel);
+        }
+      }
 
       @Override
       public void onNext(EnrichDocumentRequest request) {
@@ -187,7 +205,15 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
 
       @Override
       public void onError(Throwable error) {
-        terminated = true;
+        cancel();
+      }
+
+      /** The client is gone: stop sending, and stop the VLM work. */
+      private void cancel() {
+        synchronized (sendLock) {
+          terminated = true;
+        }
+        cancellation.cancel();
       }
 
       @Override
@@ -213,7 +239,7 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
         enriched.incrementAndGet();
         Map<String, ItemImage> cropsSnapshot = Map.copyOf(crops);
         executor.execute(() -> {
-          engine.enrich(document, cropsSnapshot, options, this::emit);
+          engine.enrich(document, cropsSnapshot, options, this::emit, cancellation);
           synchronized (sendLock) {
             if (!terminated) {
               terminated = true;
@@ -235,13 +261,17 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
         }
       }
 
+      /** Ends the RPC with an error. Enrichment already running for it has
+       * nobody left to report to, so it is cancelled too. */
       private void fail(Status status, String detail) {
         synchronized (sendLock) {
-          if (!terminated) {
-            terminated = true;
-            responseObserver.onError(status.withDescription(detail).asRuntimeException());
+          if (terminated) {
+            return;
           }
+          terminated = true;
+          responseObserver.onError(status.withDescription(detail).asRuntimeException());
         }
+        cancellation.cancel();
       }
     };
   }

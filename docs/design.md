@@ -40,7 +40,8 @@ image bytes from the document and sends crops separately.
 fallback for model names the schema does not know,
 `picture_description_area_threshold`, and the per-request overrides
 `vlm_endpoint` (accepted only when the operator allows per-request
-endpoints), `concurrency`, `timeout_seconds`. `return_document` asks for
+endpoints), `concurrency`, `timeout_seconds` (never above the server's).
+`return_document` asks for
 the patched full document in the trailer. `chart_extraction`
 (`ChartExtractionOptions`) turns on the Docling chart stage: `csv`,
 `summary`, `code` output switches, `natural_language_prompts`, and a

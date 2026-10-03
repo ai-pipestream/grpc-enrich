@@ -2,6 +2,7 @@ package ai.pipestream.enrich;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.enrich.InProcessEnrich.Collected;
@@ -11,6 +12,7 @@ import ai.pipestream.enrich.v1.DocumentChunk;
 import ai.pipestream.enrich.v1.EnrichDocumentRequest;
 import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.v1.ItemImage;
+import ai.pipestream.enrich.v1.SkipReason;
 import com.google.protobuf.ByteString;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
@@ -29,9 +31,11 @@ import java.util.concurrent.LinkedBlockingQueue;
 import org.junit.jupiter.api.Test;
 
 /**
- * Memory bounds: the byte cap covers inline documents and crops as well as
- * chunks, crops are capped in count and refused after enrichment started,
- * and the HTTP shim bounds request bodies before parsing.
+ * Memory and work bounds: the byte cap covers inline documents and crops as
+ * well as chunks, crops are capped in count and refused after enrichment
+ * started, the HTTP shim bounds request bodies before parsing, and a caller
+ * cannot raise the per-call timeout (or with it the Retry-After clamp) above
+ * the server's.
  */
 class ResourceLimitsTest {
 
@@ -258,6 +262,60 @@ class ResourceLimitsTest {
       assertThat(response.statusCode()).as("%s", response.body()).isEqualTo(413);
       assertThat(response.body()).contains("byte cap");
       assertThat(vlm.calls()).isZero();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // The server's timeout is a ceiling
+  // -------------------------------------------------------------------------
+
+  @Test
+  void callerTimeoutAboveTheServers_isClampedToIt() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer();
+        InProcessEnrich enrich = InProcessEnrich.start(EndpointPolicy.defaultOnly(vlm.url()),
+            4, 16, Duration.ofMillis(300), 64L * 1024 * 1024)) {
+      CountDownLatch never = new CountDownLatch(1);
+      vlm.gates = Map.of(1, never);
+      try {
+        // -1 is 4294967295 seconds on the wire; it must not stretch the
+        // server's 300ms per-call timeout.
+        Collected result = assertTimeoutPreemptively(Duration.ofSeconds(10),
+            () -> enrich.run(EnrichOptions.newBuilder()
+                .setDoPictureDescription(true)
+                .setTimeoutSeconds(-1)
+                .setDocument(InProcessEnrich.pictures(1))
+                .build()));
+
+        assertThat(result.skips()).singleElement()
+            .satisfies(skip -> assertThat(skip.getReason())
+                .isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR));
+      } finally {
+        never.countDown();
+      }
+    }
+  }
+
+  @Test
+  void callerTimeoutCannotLoosenTheRetryAfterClamp() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer();
+        InProcessEnrich enrich = InProcessEnrich.start(EndpointPolicy.defaultOnly(vlm.url()),
+            4, 16, Duration.ofMillis(200), 64L * 1024 * 1024)) {
+      vlm.status = 429;
+      vlm.retryAfter = "99999999";
+      // With the caller's 4e9-second timeout as the clamp, the first
+      // Retry-After would park the worker for three years.
+      Collected result = assertTimeoutPreemptively(Duration.ofSeconds(15),
+          () -> enrich.run(EnrichOptions.newBuilder()
+              .setDoPictureDescription(true)
+              .setTimeoutSeconds(-1)
+              .setDocument(InProcessEnrich.pictures(1))
+              .build()));
+
+      assertThat(result.skips()).singleElement().satisfies(skip -> {
+        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_VLM_ERROR);
+        assertThat(skip.getDetail()).contains("429");
+      });
+      assertThat(vlm.calls()).as("1 try + 5 retries").isEqualTo(6);
     }
   }
 }

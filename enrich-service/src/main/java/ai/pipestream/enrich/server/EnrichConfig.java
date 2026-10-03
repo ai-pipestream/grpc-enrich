@@ -30,7 +30,8 @@ import java.util.Set;
  *     (ENRICH_MAX_DOCUMENT_MIB)
  * @param maxConcurrentVlm cap on concurrent VLM calls per request
  *     (ENRICH_MAX_CONCURRENT_VLM; defaults to cores, min 2)
- * @param vlmTimeout per-VLM-call timeout (ENRICH_VLM_TIMEOUT_SECONDS)
+ * @param vlmTimeout per-VLM-call timeout, and the ceiling on a request's own
+ *     (ENRICH_VLM_TIMEOUT_SECONDS)
  * @param metricsInterval metrics line interval; zero disables
  *     (ENRICH_METRICS_INTERVAL_SECONDS)
  * @param httpPort HTTP front-end listen port, or null when the listener is

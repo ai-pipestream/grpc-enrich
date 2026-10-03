@@ -48,6 +48,11 @@ import java.util.concurrent.LinkedBlockingQueue;
  * byte cap (base64 for crops and bytes fields) plus 1 MiB of JSON
  * structure. A larger Content-Length is answered 413 without reading the
  * body; a body without one is read up to the limit and no further.
+ *
+ * <p><b>Disconnects.</b> When an NDJSON client goes away, the next event
+ * write fails and the in-process call is cancelled, so its VLM calls stop.
+ * The buffered endpoint writes nothing until the end, and the JDK server
+ * reports no disconnect before a write, so it runs to completion.
  */
 public final class EnrichHttpServer implements AutoCloseable {
 
@@ -149,6 +154,13 @@ public final class EnrichHttpServer implements AutoCloseable {
    */
   private static final class Harness implements StreamObserver<EnrichDocumentResponse> {
     final BlockingQueue<Object> inbox = new LinkedBlockingQueue<>();
+    StreamObserver<EnrichDocumentRequest> requester;
+
+    /** The HTTP client went away: cancel the call as a wire client would. */
+    void cancel() {
+      requester.onError(Status.CANCELLED.withDescription("HTTP client disconnected")
+          .asRuntimeException());
+    }
 
     @Override
     public void onNext(EnrichDocumentResponse event) {
@@ -169,6 +181,7 @@ public final class EnrichHttpServer implements AutoCloseable {
   private static Harness drive(EnrichServiceImpl service, Envelope envelope) {
     Harness harness = new Harness();
     StreamObserver<EnrichDocumentRequest> requester = service.enrichDocument(harness);
+    harness.requester = requester;
     requester.onNext(EnrichDocumentRequest.newBuilder().setOptions(envelope.options()).build());
     // With an inline document in options the service starts immediately, as on
     // the wire; a top-level document goes the chunk route so crops apply and
@@ -286,13 +299,18 @@ public final class EnrichHttpServer implements AutoCloseable {
     while (true) {
       Object item = take(harness.inbox);
       if (item instanceof EnrichDocumentResponse event) {
-        if (out == null) {
-          exchange.getResponseHeaders().set("Content-Type", "application/x-ndjson");
-          exchange.sendResponseHeaders(200, 0); // chunked: length unknown
-          out = exchange.getResponseBody();
+        try {
+          if (out == null) {
+            exchange.getResponseHeaders().set("Content-Type", "application/x-ndjson");
+            exchange.sendResponseHeaders(200, 0); // chunked: length unknown
+            out = exchange.getResponseBody();
+          }
+          out.write((PRINTER.print(event) + "\n").getBytes(StandardCharsets.UTF_8));
+          out.flush();
+        } catch (IOException disconnected) {
+          harness.cancel();
+          throw disconnected;
         }
-        out.write((PRINTER.print(event) + "\n").getBytes(StandardCharsets.UTF_8));
-        out.flush();
       } else if (item instanceof Throwable error) {
         Status status = Status.fromThrowable(error);
         if (out == null) {

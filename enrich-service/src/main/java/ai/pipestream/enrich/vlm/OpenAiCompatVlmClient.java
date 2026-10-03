@@ -34,7 +34,8 @@ import java.util.concurrent.TimeoutException;
  * connection-level failures (a starting vLLM endpoint commonly drops
  * connections), with exponential backoff of 0.1s, 0.2s, 0.4s, 0.8s, 1.6s,
  * honoring a {@code Retry-After} header when present (clamped to the
- * per-call timeout, so a hostile or buggy endpoint cannot park a worker for
+ * per-call timeout, which the engine never lets a caller raise above the
+ * server's own, so a hostile or buggy endpoint cannot park a worker for
  * days). Other 4xx, per-request timeouts, oversized bodies, and unparseable
  * 200 bodies are not retried. The timeout bounds each attempt individually,
  * response body included; retries can add up to 5 extra attempts plus ~3.1s
