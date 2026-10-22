@@ -17,9 +17,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
+      # A checksummed release download behaves the same on GitHub and Forgejo.
+      - name: Install buf
+        env:
+          BUF_VERSION: 1.71.0
+        run: |
+          base="https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}"
+          bin="buf-Linux-$(uname -m)"
+          cd "$RUNNER_TEMP"
+          curl -sSfLO "$base/$bin"
+          curl -sSfL "$base/sha256.txt" | grep " $bin\$" | sha256sum -c -
+          install -m 0755 "$bin" /usr/local/bin/buf
+          buf --version
       - name: buf lint
         run: buf lint
       - name: buf format
