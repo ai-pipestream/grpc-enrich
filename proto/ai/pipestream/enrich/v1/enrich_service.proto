@@ -142,6 +142,18 @@ message EnrichOptions {
   // logged, never echoed. Headers without a per-request endpoint, or with a
   // name or value HTTP does not allow, are INVALID_ARGUMENT.
   repeated VlmHeader vlm_headers = 20;
+  // Code/formula crop margin as a fraction of the element's width and
+  // height (Docling CodeFormulaVlmOptions.expansion_factor). A set value
+  // must be finite and >= 0. This server accepts zero (use the supplied crop)
+  // and rejects positive values UNIMPLEMENTED; unset preserves supplied crops.
+  optional double code_formula_expansion_factor = 21;
+  // Watch each code/formula generation as it streams and cancel the call
+  // once it keeps repeating the same short unit; the repeated tail is cut
+  // and the annotation is marked truncated_on_repetition (Docling
+  // CodeFormulaVlmOptions.stop_on_repetition). This server has no streaming
+  // repetition detector: explicit true is UNIMPLEMENTED, while unset or false
+  // preserves the existing non-streaming behavior.
+  optional bool code_formula_stop_on_repetition = 22;
 }
 
 // Typed generation parameters for one job's OpenAI-compatible
@@ -338,12 +350,18 @@ message CodeAnnotation {
   // Raw language string when the model names a language the enum does not
   // know.
   string language_raw = 3;
+  // True when the generation was cancelled for repeating itself and text is
+  // the output before the repeated tail.
+  bool truncated_on_repetition = 4;
 }
 
 // Enriched formula text for a formula item.
 message FormulaAnnotation {
   // The enriched formula text (for example a LaTeX transcription).
   string text = 1;
+  // True when the generation was cancelled for repeating itself and text is
+  // the output before the repeated tail.
+  bool truncated_on_repetition = 2;
 }
 
 // An item that was selected but could not be enriched. A skip never fails
@@ -451,6 +469,9 @@ enum CodeFormulaPreset {
   CODE_FORMULA_PRESET_UNSPECIFIED = 0;
   // CodeFormula V2 code/formula enrichment model family.
   CODE_FORMULA_PRESET_CODE_FORMULA_V2 = 1;
+  // Granite-Docling code/formula model family (Docling preset
+  // "granite_docling").
+  CODE_FORMULA_PRESET_GRANITE_DOCLING = 2;
 }
 
 // Empty request for capability discovery.

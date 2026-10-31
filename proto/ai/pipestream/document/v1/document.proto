@@ -939,6 +939,21 @@ message TextItemBase {
   // list only names who disagreed, on the item where they disagreed.
   // Empty for single-source items. Extension beyond the upstream dialect.
   repeated FieldSource field_sources = 25;
+
+  // Markup attributes in source order, including lexical presence and locations.
+  repeated SourceAttribute source_attributes = 26;
+}
+
+// A markup attribute's decoded value and source spelling. Presence distinguishes
+// a bare attribute from an explicitly empty value without inventing source bytes.
+message SourceAttribute {
+  string name = 1;
+  string name_raw = 2;
+  optional string value = 3;
+  optional ByteSpan name_span = 4;
+  optional ByteSpan value_span = 5;
+  // Absent when an older producer cannot distinguish lexical value presence.
+  optional bool value_present = 6;
 }
 
 // TitleItem represents a document title or major heading.
@@ -1411,6 +1426,18 @@ message TableData {
   // The fixed-record layout this table was decoded with; extension beyond
   // the upstream dialect.
   optional RecordLayoutMeta record_layout = 10;
+  // Named source table declarations, distinct from the sheet-wide cell grid.
+  repeated DeclaredSheetTable declared_tables = 11;
+}
+
+// One named table declared by a workbook, preserving its own schema and bands.
+message DeclaredSheetTable {
+  string name = 1;
+  // Absolute sheet coordinates with inclusive last row and column.
+  GridSpan range = 2;
+  uint32 header_row_count = 3;
+  uint32 totals_row_count = 4;
+  repeated string columns = 5;
 }
 
 // TableRow represents a single row in the table.
@@ -1783,6 +1810,14 @@ message DocumentMeta {
   // Extension beyond the upstream dialect.
   repeated FieldSource field_sources = 35;
   map<string, string> extra = 100;
+  // Source-declared workbook/document properties, retained as typed metadata.
+  optional string description = 36;
+  optional string category = 37;
+  optional string content_status = 38;
+  optional string revision = 39;
+  optional string application_version = 40;
+  optional string company = 41;
+  optional string manager = 42;
 }
 
 // Identifier is one source-scoped identifier.
@@ -1865,6 +1900,14 @@ message CellValue {
   }
   // The source's display format string for the value.
   optional string number_format = 10;
+  // The source formula alongside its cached typed result in `kind`. Older
+  // producers may instead use the legacy `formula` arm without a cached value.
+  optional string formula_source = 11;
+  // Source workbook style index when the reader exposes it.
+  optional uint32 style_id = 12;
+  // Source number-format identifier, including reserved/localized formats
+  // whose display code is unavailable.
+  optional uint32 number_format_id = 13;
 }
 
 // CivilDateTime is a wall-clock date or datetime as the source wrote it,
