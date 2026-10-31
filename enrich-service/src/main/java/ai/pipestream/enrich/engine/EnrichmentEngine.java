@@ -171,6 +171,27 @@ public final class EnrichmentEngine {
    * repeats a header value.
    */
   public Status validate(EnrichOptions options) {
+    if (options.hasCodeFormulaExpansionFactor()) {
+      double expansion = options.getCodeFormulaExpansionFactor();
+      if (!Double.isFinite(expansion) || expansion < 0.0) {
+        return Status.INVALID_ARGUMENT.withDescription(
+            "code_formula_expansion_factor must be finite and >= 0");
+      }
+      if (expansion != 0.0) {
+        return Status.UNIMPLEMENTED.withDescription(
+            "code_formula_expansion_factor: expanded code/formula crops are not supported;"
+                + " supply the intended crop and omit this option or set zero");
+      }
+    }
+    if (options.hasCodeFormulaStopOnRepetition() && options.getCodeFormulaStopOnRepetition()) {
+      return Status.UNIMPLEMENTED.withDescription(
+          "code_formula_stop_on_repetition: this server has no streaming repetition detector");
+    }
+    if (options.getCodeFormulaPreset()
+        == ai.pipestream.enrich.v1.CodeFormulaPreset.CODE_FORMULA_PRESET_GRANITE_DOCLING) {
+      return Status.UNIMPLEMENTED.withDescription(
+          "code_formula_preset GRANITE_DOCLING is not supported by this server");
+    }
     List<String> requested = requestEndpoints(options);
     for (String endpoint : requested) {
       try {

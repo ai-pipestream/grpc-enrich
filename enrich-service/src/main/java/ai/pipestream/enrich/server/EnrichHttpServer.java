@@ -352,6 +352,7 @@ public final class EnrichHttpServer implements AutoCloseable {
       case INVALID_ARGUMENT -> 400;
       case PERMISSION_DENIED -> 403;
       case RESOURCE_EXHAUSTED -> 413;
+      case UNIMPLEMENTED -> 501;
       default -> 500;
     };
   }

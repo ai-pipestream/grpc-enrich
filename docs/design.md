@@ -74,9 +74,9 @@ The binary also exposes the service over HTTP on `ENRICH_HTTP_PORT` (default
 drives the existing `EnrichServiceImpl` through an in-process
 `StreamObserver` harness, playing options, crops, completing chunk,
 half-close exactly as a wire client would. `POST /v1/enrich` buffers the
-events into one `{"events": [...]}` reply (400 / 403 / 413 / 500 mapped from
-`INVALID_ARGUMENT` / `PERMISSION_DENIED` / `RESOURCE_EXHAUSTED` / anything
-else; bodies over 4/3 of the byte cap plus 1 MiB are 413 before parsing);
+events into one `{"events": [...]}` reply (400 / 403 / 413 / 501 / 500 mapped from
+`INVALID_ARGUMENT` / `PERMISSION_DENIED` / `RESOURCE_EXHAUSTED` / `UNIMPLEMENTED` /
+anything else; bodies over 4/3 of the byte cap plus 1 MiB are 413 before parsing);
 `POST /v1/enrich/stream` forwards each event as a flushed NDJSON line so HTTP
 callers get the same live per-item stream; `GET /healthz` is a static 200.
 `GetServiceInfo` remains gRPC-only.
@@ -120,3 +120,17 @@ The enrich process does not download Hugging Face repos. The operator points
 - VLM endpoint down: items skipped with reason, not a process crash.
   Transient failures (HTTP 429/500/502/503/504 and connection drops) are
   retried first: 5 retries, exponential backoff from 0.1s.
+
+
+### Code/formula option compatibility
+
+The additive contract retains `code_formula_expansion_factor`,
+`code_formula_stop_on_repetition` and the Granite Docling preset so clients
+can exchange one fleet schema. This implementation accepts an absent or zero
+expansion factor and uses the supplied crop unchanged. Positive expansion,
+explicit repetition stopping, and the Granite Docling preset fail with
+`UNIMPLEMENTED` before document processing or VLM calls (HTTP 501).
+Invalid expansion factors fail `INVALID_ARGUMENT`. Absent repetition settings
+retain the current non-streaming behavior; they do not promise a repetition
+cancellation feature. The annotation truncation fields remain false because
+this server never cancels generation for repetition.
