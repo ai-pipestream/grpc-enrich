@@ -37,6 +37,8 @@ import java.util.Set;
  *     (ENRICH_METRICS_INTERVAL_SECONDS)
  * @param httpPort HTTP front-end listen port, or null when the listener is
  *     disabled (ENRICH_HTTP_PORT blank or "0")
+ * @param vlmModel the model ENRICH_VLM_URL serves (ENRICH_VLM_MODEL); empty when
+ *     unknown. A general VLM gets the LaTeX formula prompt by default
  */
 record EnrichConfig(
     int port,
@@ -48,7 +50,8 @@ record EnrichConfig(
     int maxConcurrentVlm,
     Duration vlmTimeout,
     Duration metricsInterval,
-    Integer httpPort) {
+    Integer httpPort,
+    String vlmModel) {
 
   /** Default port for the HTTP front end when ENRICH_HTTP_PORT is unset. */
   static final int DEFAULT_HTTP_PORT = 50068;
@@ -71,12 +74,13 @@ record EnrichConfig(
         intFromEnv(env, "ENRICH_MAX_CONCURRENT_VLM", Math.max(2, cores), 1, 256),
         Duration.ofSeconds(intFromEnv(env, "ENRICH_VLM_TIMEOUT_SECONDS", 300, 1, 86400)),
         Duration.ofSeconds(intFromEnv(env, "ENRICH_METRICS_INTERVAL_SECONDS", 60, 0, 86400)),
-        httpPortFromEnv(env));
+        httpPortFromEnv(env),
+        env.getOrDefault("ENRICH_VLM_MODEL", "").strip());
   }
 
   /** The endpoint policy these knobs describe. */
   EndpointPolicy endpointPolicy() {
-    return new EndpointPolicy(vlmUrl, vlmApiKey, allowRequestEndpoint, vlmEndpointAllowlist);
+    return new EndpointPolicy(vlmUrl, vlmApiKey, allowRequestEndpoint, vlmEndpointAllowlist, vlmModel);
   }
 
   /** How per-request endpoints are treated, for the startup line. */

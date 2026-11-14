@@ -154,6 +154,13 @@ message EnrichOptions {
   // repetition detector: explicit true is UNIMPLEMENTED, while unset or false
   // preserves the existing non-streaming behavior.
   optional bool code_formula_stop_on_repetition = 22;
+  // How formula images are prompted. Unset: the CodeFormula token prompt
+  // ("<formula>", Docling's) when the model is a CodeFormula model or unknown,
+  // and FORMULA_PROMPT_LATEX_WITH_TEXT_HINT when the model is a general VLM
+  // (the request's model when it names its own vlm_endpoint, otherwise the
+  // operator's ENRICH_VLM_MODEL). Set it to pin a style, for example
+  // FORMULA_PROMPT_CODEFORMULA_TOKEN for a like-for-like Docling comparison.
+  FormulaPrompt formula_prompt = 23;
 }
 
 // Typed generation parameters for one job's OpenAI-compatible
@@ -458,6 +465,20 @@ enum ChartPreset {
   CHART_PRESET_UNSPECIFIED = 0;
   // Granite Vision chart2csv: chart image to CSV table.
   CHART_PRESET_GRANITE_VISION_CHART2CSV = 1;
+}
+
+// How a formula image is put to the VLM.
+enum FormulaPrompt {
+  // Chosen by the model: see EnrichOptions.formula_prompt.
+  FORMULA_PROMPT_UNSPECIFIED = 0;
+  // The bare "<formula>" token the CodeFormula models are trained on
+  // (Docling's prompt).
+  FORMULA_PROMPT_CODEFORMULA_TOKEN = 1;
+  // An instruction to answer with the LaTeX only.
+  FORMULA_PROMPT_LATEX = 2;
+  // FORMULA_PROMPT_LATEX plus the item's PDF text layer as a hint for
+  // symbols and subscripts, with the image deciding the structure.
+  FORMULA_PROMPT_LATEX_WITH_TEXT_HINT = 3;
 }
 
 // Code/formula model families served by the remote endpoint.

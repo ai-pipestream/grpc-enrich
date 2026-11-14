@@ -131,7 +131,6 @@ public final class ItemSelector {
       "Write Python code using matplotlib that recreates this chart. "
           + "Return only a fenced ```python code block.";
   private static final String CODE_IMAGE_PROMPT = "<code>";
-  private static final String FORMULA_IMAGE_PROMPT = "<formula>";
 
   // Text-only fallbacks for code/formula items with no image crop, so
   // enrichment still works when the caller cannot supply crops.
@@ -197,9 +196,11 @@ public final class ItemSelector {
         String selfRef = selfRef(formula.getBase().getSelfRef(), "#/texts/", i);
         VlmImage image = crop(selfRef, crops);
         if (image != null) {
+          // The token for a CodeFormula model, LaTeX (with the text layer as a hint) for a
+          // general VLM; FormulaPrompts.resolve decided which before selection.
           work.add(new WorkItem(selfRef, Kind.FORMULA, codeFormulaModel(options),
-              FORMULA_IMAGE_PROMPT, image, formula.getBase().getText(), MAX_TOKENS_CODE_FORMULA,
-              -1, i));
+              FormulaPrompts.imagePrompt(options, formula.getBase().getText()), image,
+              formula.getBase().getText(), MAX_TOKENS_CODE_FORMULA, -1, i));
         } else {
           work.add(new WorkItem(selfRef, Kind.FORMULA, codeFormulaModel(options),
               FORMULA_TEXT_PROMPT + formula.getBase().getText(), null, formula.getBase().getText(),

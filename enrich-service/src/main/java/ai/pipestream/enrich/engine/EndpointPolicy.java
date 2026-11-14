@@ -40,20 +40,30 @@ import java.util.stream.Collectors;
  * @param allowedRequestOrigins origins callers may name even when
  *     {@code allowAnyRequestEndpoint} is off, normalized by
  *     {@link VlmEndpoint#origin(String)} (ENRICH_VLM_ENDPOINT_ALLOWLIST)
+ * @param servedModel the model {@code defaultEndpoint} serves (ENRICH_VLM_MODEL); empty when
+ *     unknown. It picks the formula prompt style (FormulaPrompts).
  */
 public record EndpointPolicy(
     String defaultEndpoint,
     String defaultApiKey,
     boolean allowAnyRequestEndpoint,
-    Set<String> allowedRequestOrigins) {
+    Set<String> allowedRequestOrigins,
+    String servedModel) {
 
   public EndpointPolicy {
+    servedModel = servedModel == null ? "" : servedModel.strip();
     defaultEndpoint = defaultEndpoint == null ? "" : defaultEndpoint;
     defaultApiKey = defaultApiKey == null ? "" : defaultApiKey;
     allowedRequestOrigins = allowedRequestOrigins.stream()
         .map(VlmEndpoint::origin)
         .filter(origin -> !origin.isEmpty())
         .collect(Collectors.toUnmodifiableSet());
+  }
+
+  /** A policy whose endpoint's model is unknown. */
+  public EndpointPolicy(String defaultEndpoint, String defaultApiKey, boolean allowAnyRequestEndpoint,
+      Set<String> allowedRequestOrigins) {
+    this(defaultEndpoint, defaultApiKey, allowAnyRequestEndpoint, allowedRequestOrigins, "");
   }
 
   /** Only the operator's endpoint, no key, no per-request endpoints. */
@@ -97,6 +107,7 @@ public record EndpointPolicy(
     return "EndpointPolicy[defaultEndpoint=" + VlmEndpoint.origin(defaultEndpoint)
         + ", defaultApiKey=" + (defaultApiKey.isEmpty() ? "unset" : "[REDACTED]")
         + ", allowAnyRequestEndpoint=" + allowAnyRequestEndpoint
-        + ", allowedRequestOrigins=" + allowedRequestOrigins + "]";
+        + ", allowedRequestOrigins=" + allowedRequestOrigins
+        + ", servedModel=" + (servedModel.isEmpty() ? "unset" : servedModel) + "]";
   }
 }

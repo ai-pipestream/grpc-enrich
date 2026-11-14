@@ -396,7 +396,8 @@ public final class EnrichmentEngine {
       EnrichOptions options,
       Consumer<EnrichDocumentResponse> emit,
       Cancellation cancellation) {
-    Selection selection = ItemSelector.select(document, crops, options);
+    Selection selection = ItemSelector.select(document, crops,
+        FormulaPrompts.resolve(options, endpoints.servedModel()));
     emit.accept(event(EnrichStarted.newBuilder()
         .setPictureDescriptions((int) selection.count(Kind.DESCRIPTION))
         .setChartExtractions((int) selection.count(Kind.CHART))
@@ -658,7 +659,7 @@ public final class EnrichmentEngine {
               .setLanguageRaw(code.languageRaw());
         }
         case FORMULA -> annotation.getFormulaBuilder()
-            .setText(CodeFormulaPostProcessor.processFormula(content));
+            .setText(FormulaReply.text(item.prompt(), content));
       }
       ItemAnnotation built = annotation.build();
       succeeded.incrementAndGet();
