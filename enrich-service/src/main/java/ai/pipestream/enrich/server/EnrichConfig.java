@@ -36,7 +36,8 @@ import java.util.Set;
  * @param metricsInterval metrics line interval; zero disables
  *     (ENRICH_METRICS_INTERVAL_SECONDS)
  * @param httpPort HTTP front-end listen port, or null when the listener is
- *     disabled (ENRICH_HTTP_PORT blank or "0")
+ *     disabled, which it is unless ENRICH_HTTP_PORT names a port (unset,
+ *     blank and "0" all leave it off)
  * @param vlmModel the model ENRICH_VLM_URL serves (ENRICH_VLM_MODEL); empty when
  *     unknown. A general VLM gets the LaTeX formula prompt by default
  */
@@ -53,8 +54,9 @@ record EnrichConfig(
     Integer httpPort,
     String vlmModel) {
 
-  /** Default port for the HTTP front end when ENRICH_HTTP_PORT is unset. */
-  static final int DEFAULT_HTTP_PORT = 50068;
+  /** The port the fleet reserves for the HTTP front end; an operator who
+   * wants the shim sets ENRICH_HTTP_PORT to it. Nothing listens by default. */
+  static final int RESERVED_HTTP_PORT = 50068;
 
   /** Reads and validates every knob from the process environment. */
   static EnrichConfig fromEnv() {
@@ -173,16 +175,18 @@ record EnrichConfig(
     }
   }
 
-  /** Unset applies the default HTTP port; blank or "0" turns the listener off. */
+  /**
+   * The HTTP front end is opt-in: unset, blank, or "0" leaves it off. It
+   * takes the typed Document as JSON, so it is a second, untyped front door
+   * for the Document plane; gRPC is the API, and nothing opens the shim
+   * unless the operator names a port.
+   */
   private static Integer httpPortFromEnv(Map<String, String> env) {
     String configured = env.get("ENRICH_HTTP_PORT");
-    if (configured == null) {
-      return DEFAULT_HTTP_PORT;
-    }
-    if (configured.isBlank() || configured.strip().equals("0")) {
+    if (configured == null || configured.isBlank() || configured.strip().equals("0")) {
       return null;
     }
-    return intFromEnv(env, "ENRICH_HTTP_PORT", DEFAULT_HTTP_PORT, 1, 65535);
+    return intFromEnv(env, "ENRICH_HTTP_PORT", RESERVED_HTTP_PORT, 1, 65535);
   }
 
   private static int intFromEnv(Map<String, String> env, String name, int fallback, int min,

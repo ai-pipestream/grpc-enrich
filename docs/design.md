@@ -67,8 +67,10 @@ are the real API.
 
 ### HTTP shim
 
-The binary also exposes the service over HTTP on `ENRICH_HTTP_PORT` (default
-50068, `0`/empty disables it; gRPC stays on 50056). It is a shim, not a fork:
+The binary can also expose the service over HTTP on `ENRICH_HTTP_PORT` (off
+unless set; 50068 is the port reserved for it; gRPC stays on 50056). It is
+opt-in because it takes the typed Document as JSON, a second and untyped
+front door for the Document plane. It is a shim, not a fork:
 `EnrichHttpServer` parses the proto3-JSON envelope (`{"options": ...,
 "document": ..., "item_images": ...}`) with protobuf's `JsonFormat` and
 drives the existing `EnrichServiceImpl` through an in-process

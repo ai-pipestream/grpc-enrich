@@ -46,7 +46,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | Env | Default | Meaning |
 |---|---|---|
 | `ENRICH_PORT` | `50056` | gRPC listen port |
-| `ENRICH_HTTP_PORT` | `50068` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
+| `ENRICH_HTTP_PORT` | unset (off) | HTTP front-end listen port. Off unless set: gRPC is the API, and the JSON shim opens only when an operator asks for it (`50068` is the port reserved for it). `0` or empty also leaves it off |
 | `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Logs and `GetServiceInfo` show only its origin |
 | `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
 | `ENRICH_VLM_MODEL` | unset | The model `ENRICH_VLM_URL` serves, for example `Qwen2.5-VL-7B-Instruct`. A general VLM (anything not a CodeFormula, granite-docling or SmolDocling model) gets formula images with a LaTeX prompt and the item's text layer as a hint, instead of the bare `<formula>` token it does not know. `EnrichOptions.formula_prompt` overrides per request. Unset keeps the token prompt |
@@ -88,8 +88,11 @@ v1alpha).
 
 ## HTTP API
 
-The same binary also serves an HTTP front end on `ENRICH_HTTP_PORT` (default
-`50068`; set to `0` or empty to disable). It is a thin shim over the gRPC
+The same binary can also serve an HTTP front end, **off by default**: set
+`ENRICH_HTTP_PORT` (the fleet reserves `50068` for it) to turn it on. gRPC is
+the API; the shim takes the typed `Document` as JSON text and re-encodes it on
+the way in, so it is a convenience for callers that cannot speak gRPC, not a
+path fleet services use. It is a thin shim over the gRPC
 `EnrichServiceImpl`: requests are driven through the same streaming code
 path, so events, skip semantics, and the byte cap are identical. All bodies
 are canonical proto3 JSON (protobuf `JsonFormat`): camelCase or snake_case
@@ -122,7 +125,9 @@ parsed (from `Content-Length` when present, without reading the body).
   (`application/x-ndjson`): each `EnrichDocumentResponse` is written as one
   flushed line the moment the stream produces it, so HTTP callers see the
   same live per-item events gRPC clients get. A mid-stream failure ends the
-  response with a final `{"error": "..."}` line. When the client hangs up,
+  response with a final `{"error": "...", "code": "<gRPC status code>"}` line
+  (for example `UNAVAILABLE`); error bodies of both endpoints carry the same
+  `code` whenever the failure came from the RPC. When the client hangs up,
   the next event write fails and the call is cancelled, so its VLM calls
   stop.
 - `GET /healthz`: `200 ok` when the server is up.
