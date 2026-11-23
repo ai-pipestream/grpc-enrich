@@ -78,7 +78,9 @@ events into one `{"events": [...]}` reply (400 / 403 / 413 / 501 / 500 mapped fr
 `INVALID_ARGUMENT` / `PERMISSION_DENIED` / `RESOURCE_EXHAUSTED` / `UNIMPLEMENTED` /
 anything else; bodies over 4/3 of the byte cap plus 1 MiB are 413 before parsing);
 `POST /v1/enrich/stream` forwards each event as a flushed NDJSON line so HTTP
-callers get the same live per-item stream; `GET /healthz` is a static 200.
+callers get the same live per-item stream; `GET /healthz` follows the VLM
+health probe (200 while a VLM this server depends on answers, 503 otherwise),
+the same answer `grpc.health.v1` gives.
 `GetServiceInfo` remains gRPC-only.
 
 ## 4. Presets

@@ -43,8 +43,10 @@ service EnrichService {
   // starts when that chunk arrives.
   rpc EnrichDocument(stream EnrichDocumentRequest) returns (stream EnrichDocumentResponse);
   // Reports server identity and operational limits: versions, the configured
-  // default VLM endpoint, the document byte cap, and the VLM concurrency cap.
-  // Intended for capability discovery by orchestrators and LLM tool facades.
+  // default VLM endpoint, the document byte cap, the VLM concurrency cap, and
+  // whether each operator-named VLM endpoint is answering and which models it
+  // reports. Intended for capability discovery by orchestrators and LLM tool
+  // facades.
   rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 }
 
@@ -518,6 +520,45 @@ message GetServiceInfoResponse {
   uint32 max_concurrent_vlm_calls = 5;
   // Frontend advertisement for the shared demo shell.
   UiInfo ui = 6;
+  // What each VLM endpoint the operator named answered the server's last
+  // probe: ENRICH_VLM_URL first (default_endpoint true), then every
+  // ENRICH_VLM_ENDPOINT_ALLOWLIST origin. Empty when the operator named none
+  // (ENRICH_ALLOW_REQUEST_ENDPOINT alone). grpc.health.v1 reports NOT_SERVING
+  // while the default endpoint is not serving or, with no default endpoint,
+  // while none of the allowlisted origins is.
+  repeated VlmEndpointStatus vlm_endpoints = 7;
+}
+
+// One operator-named VLM endpoint as of the server's last probe of it. The
+// probe is a GET of the endpoint's model list (the /models sibling of its
+// chat-completions URL); it costs no generation and does not queue behind
+// running completions.
+message VlmEndpointStatus {
+  // The endpoint as scheme://host[:port]. Userinfo, path, and query are
+  // never reported, so a credential in the configured URL stays private.
+  string origin = 1;
+  // True for ENRICH_VLM_URL, the endpoint used when a request names none.
+  bool default_endpoint = 2;
+  // Whether the endpoint answered the last probe.
+  VlmEndpointState state = 3;
+  // Why the endpoint is not serving: the connection failure, the timeout, or
+  // the HTTP status. Empty when it is serving.
+  string detail = 4;
+  // The model ids the endpoint's model list reported, in its order: what the
+  // endpoint says it is serving, as opposed to what a request asked for.
+  // Empty when the endpoint has no model list.
+  repeated string models = 5;
+}
+
+// Whether a VLM endpoint answered the server's last probe.
+enum VlmEndpointState {
+  // Not probed yet (the server has just started).
+  VLM_ENDPOINT_STATE_UNSPECIFIED = 0;
+  // The endpoint's HTTP server answered and did not refuse the request.
+  VLM_ENDPOINT_STATE_SERVING = 1;
+  // The endpoint could not be reached, timed out, answered a 5xx status, or
+  // refused the operator's credential (401, 403).
+  VLM_ENDPOINT_STATE_NOT_SERVING = 2;
 }
 
 // Frontend advertisement. Same shape in every ai-pipestream grpc service:

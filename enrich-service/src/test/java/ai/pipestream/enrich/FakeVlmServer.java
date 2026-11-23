@@ -58,6 +58,16 @@ final class FakeVlmServer implements AutoCloseable {
   volatile String rawOkBody;
   /** When non-null, sent as Retry-After with every non-200 reply. */
   volatile String retryAfter;
+  /** The status of {@code GET /v1/models}; 404 is an endpoint with no model
+   * list. */
+  volatile int modelsStatus = 200;
+  /** The model ids {@code GET /v1/models} lists. */
+  volatile List<String> modelIds = List.of("fake-vlm");
+  /** When non-null, {@code GET /v1/models} waits on it before answering. */
+  volatile CountDownLatch modelsGate;
+  /** The headers of every {@code GET /v1/models}, in arrival order. */
+  final ConcurrentLinkedQueue<Map<String, List<String>>> modelListRequests =
+      new ConcurrentLinkedQueue<>();
 
   FakeVlmServer() {
     try {
@@ -91,6 +101,29 @@ final class FakeVlmServer implements AutoCloseable {
       if (code != 200 && retryAfter != null) {
         exchange.getResponseHeaders().set("Retry-After", retryAfter);
       }
+      exchange.sendResponseHeaders(code, response.length);
+      try (OutputStream out = exchange.getResponseBody()) {
+        out.write(response);
+      }
+    });
+    server.createContext("/v1/models", exchange -> {
+      modelListRequests.add(Map.copyOf(exchange.getRequestHeaders()));
+      CountDownLatch gate = modelsGate;
+      if (gate != null) {
+        try {
+          gate.await();
+        } catch (InterruptedException interrupt) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      int code = modelsStatus;
+      StringBuilder list = new StringBuilder("{\"object\":\"list\",\"data\":[");
+      for (String id : modelIds) {
+        list.append(list.charAt(list.length() - 1) == '[' ? "" : ",")
+            .append("{\"id\":").append(Json.quote(id)).append(",\"object\":\"model\"}");
+      }
+      byte[] response = (code == 200 ? list.append("]}").toString() : errorBody)
+          .getBytes(StandardCharsets.UTF_8);
       exchange.sendResponseHeaders(code, response.length);
       try (OutputStream out = exchange.getResponseBody()) {
         out.write(response);

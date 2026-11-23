@@ -50,6 +50,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Logs and `GetServiceInfo` show only its origin |
 | `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
 | `ENRICH_VLM_MODEL` | unset | The model `ENRICH_VLM_URL` serves, for example `Qwen2.5-VL-7B-Instruct`. A general VLM (anything not a CodeFormula, granite-docling or SmolDocling model) gets formula images with a LaTeX prompt and the item's text layer as a hint, instead of the bare `<formula>` token it does not know. `EnrichOptions.formula_prompt` overrides per request. Unset keeps the token prompt |
+| `ENRICH_VLM_PROBE_INTERVAL_SECONDS` | `15` | Seconds between health probes of `ENRICH_VLM_URL` and each `ENRICH_VLM_ENDPOINT_ALLOWLIST` origin (1 to 3600). See [Health](#health) |
 | `ENRICH_ALLOW_REQUEST_ENDPOINT` | `false` | `true` lets a request name any http(s) VLM endpoint on a public address (`EnrichOptions.vlm_endpoint`, `chart_extraction.vlm_endpoint`); otherwise such a request is `PERMISSION_DENIED`. See [Security](#security) |
 | `ENRICH_VLM_ENDPOINT_ALLOWLIST` | unset | Comma-separated origins (`https://vlm.internal:8443`) a request may name even when `ENRICH_ALLOW_REQUEST_ENDPOINT` is off. The origin of `ENRICH_VLM_URL` is always allowed and need not be listed |
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
@@ -59,6 +60,38 @@ ENRICH_VLM_URL=http://localhost:8080 \
 
 The server registers `grpc.health.v1.Health` and server reflection (v1 and
 v1alpha).
+
+### Health
+
+Health follows the VLM, because a grpc-enrich with no VLM answers every RPC
+OK and skips every item.
+
+- **Startup.** With `ENRICH_VLM_URL` unset, no
+  `ENRICH_VLM_ENDPOINT_ALLOWLIST` and `ENRICH_ALLOW_REQUEST_ENDPOINT` off,
+  no request could ever reach a VLM and the server refuses to start.
+- **Probe.** At startup and every `ENRICH_VLM_PROBE_INTERVAL_SECONDS` the
+  server GETs the model list of `ENRICH_VLM_URL` (the sibling of its
+  chat-completions URL, `/v1/models` for llama.cpp and OpenAI, `/v3/models`
+  for OVMS) and of each allowlisted origin (`<origin>/v1/models`). The probe
+  costs no generation and does not queue behind running completions.
+  `ENRICH_VLM_API_KEY` is sent to `ENRICH_VLM_URL` only. An endpoint is
+  serving when it answers below 500 and does not refuse the credential
+  (401/403); a connection failure, no answer within 5 s, or a 5xx (llama.cpp
+  answers 503 while it loads a model) is not serving.
+- **Rule.** With `ENRICH_VLM_URL` set, health is that endpoint's state. With
+  only an allowlist, health is SERVING while at least one allowlisted origin
+  answers. With only `ENRICH_ALLOW_REQUEST_ENDPOINT=true` there is nothing
+  to probe and health is SERVING. Until the first probe finishes, health is
+  NOT_SERVING.
+- **Where it shows.** `grpc.health.v1.Health/Check` and `Watch` (for `""`
+  and `ai.pipestream.enrich.v1.EnrichService`), `GET /healthz` on the HTTP
+  front end, and `GetServiceInfoResponse.vlm_endpoints`: one typed
+  `VlmEndpointStatus` per probed endpoint with its origin, state, the reason
+  when it is not serving, and the model ids it lists.
+
+A NOT_SERVING server still accepts RPCs: items come back as
+`ItemSkipped{SKIP_REASON_VLM_ERROR}` with the reason, and a request that
+names its own reachable endpoint still works.
 
 ## Wire API
 
@@ -125,7 +158,8 @@ parsed (from `Content-Length` when present, without reading the body).
   response with a final `{"error": "..."}` line. When the client hangs up,
   the next event write fails and the call is cancelled, so its VLM calls
   stop.
-- `GET /healthz`: `200 ok` when the server is up.
+- `GET /healthz`: `200 ok` while a VLM the server depends on is answering,
+  `503 not serving` while none is (see [Health](#health)).
 
 ```sh
 # Sync: one JSON document with every event

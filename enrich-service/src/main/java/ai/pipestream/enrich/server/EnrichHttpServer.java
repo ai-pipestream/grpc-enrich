@@ -41,7 +41,9 @@ import java.util.concurrent.LinkedBlockingQueue;
  * {@code POST /v1/enrich/stream} answers chunked NDJSON, one flushed line per
  * EnrichDocumentResponse event as the stream produces it, with a final
  * {@code {"error":…}} line when the stream fails mid-flight;
- * {@code GET /healthz} is a static 200 "ok".
+ * {@code GET /healthz} answers 200 "ok" while a VLM this server depends on
+ * is answering and 503 "not serving" while none is, the same answer
+ * {@code grpc.health.v1} gives.
  *
  * <p><b>Body limit.</b> A request body is read into memory and parsed into
  * several copies, so it is capped before any of that: 4/3 of the service's
@@ -73,7 +75,7 @@ public final class EnrichHttpServer implements AutoCloseable {
     long cap = service.maxDocumentBytes();
     maxBodyBytes = (int) Math.min(Integer.MAX_VALUE - 8, cap + cap / 3 + BODY_SLACK_BYTES);
     server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
-    server.createContext("/healthz", EnrichHttpServer::healthz);
+    server.createContext("/healthz", exchange -> healthz(service, exchange));
     server.createContext("/v1/enrich", exchange -> enrichSync(service, exchange));
     server.createContext("/v1/enrich/stream", exchange -> enrichStream(service, exchange));
     server.setExecutor(executor);
@@ -334,16 +336,18 @@ public final class EnrichHttpServer implements AutoCloseable {
     }
   }
 
-  private static void healthz(HttpExchange exchange) throws IOException {
+  private static void healthz(EnrichServiceImpl service, HttpExchange exchange)
+      throws IOException {
     if (!"GET".equals(exchange.getRequestMethod())) {
       sendError(exchange, 405, "GET only");
       return;
     }
-    byte[] ok = "ok".getBytes(StandardCharsets.UTF_8);
+    boolean serving = service.vlmServing();
+    byte[] answer = (serving ? "ok" : "not serving").getBytes(StandardCharsets.UTF_8);
     exchange.getResponseHeaders().set("Content-Type", "text/plain");
-    exchange.sendResponseHeaders(200, ok.length);
+    exchange.sendResponseHeaders(serving ? 200 : 503, answer.length);
     try (OutputStream out = exchange.getResponseBody()) {
-      out.write(ok);
+      out.write(answer);
     }
   }
 

@@ -56,6 +56,26 @@ public final class VlmEndpoint {
   }
 
   /**
+   * The model-list URL beside {@code endpoint}'s chat-completions URL: the
+   * same path with {@code /chat/completions} replaced by {@code /models}
+   * ({@code /v1/models} for llama.cpp and OpenAI, {@code /v3/models} for
+   * OVMS). Null when the endpoint carries a query string, because such a URL
+   * is used verbatim (an Azure deployment, a signed URL) and has no sibling
+   * this service can name.
+   *
+   * @throws IllegalArgumentException as {@link #completionsUri(String)}
+   */
+  public static URI modelsUri(String endpoint) {
+    URI completions = completionsUri(endpoint);
+    if (completions.getRawQuery() != null) {
+      return null;
+    }
+    String path = completions.getRawPath();
+    return URI.create(completions.getScheme() + "://" + completions.getRawAuthority()
+        + path.substring(0, path.length() - COMPLETIONS_PATH.length()) + "/models");
+  }
+
+  /**
    * {@code scheme://host[:port]} of {@code endpoint}, lowercased, with the
    * scheme's default port left out; userinfo, path, query, and fragment are
    * dropped. Empty for a blank or unusable URL.
