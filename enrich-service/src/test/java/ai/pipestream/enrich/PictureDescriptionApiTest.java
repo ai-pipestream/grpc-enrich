@@ -211,7 +211,8 @@ class PictureDescriptionApiTest {
         assertThat(request.header("Authorization")).containsExactly("Bearer " + CALLER_TOKEN);
         assertThat(request.header("X-Tenant")).containsExactly("acme");
       });
-      assertThat(operator.recorded()).singleElement().satisfies(request -> {
+      // The two description calls (the chart is described too).
+      assertThat(operator.recorded()).hasSize(2).allSatisfy(request -> {
         assertThat(request.header("Authorization")).isEmpty();
         assertThat(request.header("X-Tenant")).isEmpty();
       });

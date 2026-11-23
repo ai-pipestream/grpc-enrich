@@ -46,7 +46,7 @@ public final class GrpcEnrichServer {
 
     Server server = startGrpcServer(config, service);
     EnrichHttpServer httpServer = startHttpServer(config, service, executor);
-    ScheduledExecutorService metrics = startMetrics(config, service);
+    ScheduledExecutorService metrics = startMetrics(config, service, engine);
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
       if (metrics != null) {
@@ -114,7 +114,7 @@ public final class GrpcEnrichServer {
 
   /** Schedules the periodic metrics line, or returns null when disabled. */
   private static ScheduledExecutorService startMetrics(
-      EnrichConfig config, EnrichServiceImpl service) {
+      EnrichConfig config, EnrichServiceImpl service, EnrichmentEngine engine) {
     long seconds = config.metricsInterval().toSeconds();
     if (seconds <= 0) {
       return null;
@@ -125,9 +125,15 @@ public final class GrpcEnrichServer {
       return thread;
     });
     metrics.scheduleAtFixedRate(
-        () -> System.out.println("grpc-enrich metrics: docs{enriched=" + service.enriched.get()
-            + ",rejected=" + service.rejected.get() + "}"),
+        () -> System.out.println(metricsLine(service, engine)),
         seconds, seconds, TimeUnit.SECONDS);
     return metrics;
+  }
+
+  /** The periodic metrics line: what happened to the items (annotated,
+   * failed, skipped by reason), not only that documents arrived. */
+  static String metricsLine(EnrichServiceImpl service, EnrichmentEngine engine) {
+    return "grpc-enrich metrics: " + engine.metrics().line()
+        + " rpcs{rejected=" + service.rejected.get() + "}";
   }
 }

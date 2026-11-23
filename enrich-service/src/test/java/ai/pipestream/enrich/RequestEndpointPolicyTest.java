@@ -144,9 +144,10 @@ class RequestEndpointPolicyTest {
           .build());
 
       assertThat(result.error()).isNull();
-      assertThat(result.annotations()).hasSize(2);
+      // The chart's output plus a description of each picture (the chart too).
+      assertThat(result.annotations()).hasSize(3);
       // Named by the caller, so the key stays off even on the operator's origin.
-      assertThat(operator.recorded()).hasSize(2).allSatisfy(request -> {
+      assertThat(operator.recorded()).hasSize(3).allSatisfy(request -> {
         assertThat(request.header("Authorization")).isEmpty();
         assertThat(request.headers().toString()).doesNotContain(OPERATOR_KEY);
       });
@@ -253,9 +254,10 @@ class RequestEndpointPolicyTest {
           .build());
 
       assertThat(result.error()).isNull();
-      assertThat(result.annotations()).hasSize(2);
-      assertThat(operator.recorded()).singleElement()
-          .satisfies(request -> assertThat(request.header("Authorization"))
+      // One chart table, and a description of each picture (the chart too).
+      assertThat(result.annotations()).hasSize(3);
+      assertThat(operator.recorded()).hasSize(2)
+          .allSatisfy(request -> assertThat(request.header("Authorization"))
               .containsExactly("Bearer " + OPERATOR_KEY));
       assertThat(chartModel.recorded()).singleElement().satisfies(request -> {
         assertThat(request.header("Authorization")).isEmpty();

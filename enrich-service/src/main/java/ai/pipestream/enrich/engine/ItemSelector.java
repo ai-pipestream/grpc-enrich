@@ -35,7 +35,9 @@ import java.util.Set;
  * CodeFormula) except that a request may replace the picture-description
  * prompt, model, and budget, and a picture is a chart when its top figure-class
  * prediction is one of the supported chart types (bar_chart, pie_chart,
- * line_chart) or the picture carries the label DOC_ITEM_LABEL_CHART.
+ * line_chart) or the picture carries the label DOC_ITEM_LABEL_CHART. The
+ * description job and the chart job are independent, as in Docling: a chart
+ * picture with both requested is selected for both.
  */
 public final class ItemSelector {
 
@@ -150,18 +152,18 @@ public final class ItemSelector {
     for (int i = 0; i < document.getPicturesCount(); i++) {
       PictureItem picture = document.getPictures(i);
       String selfRef = selfRef(picture.getSelfRef(), "#/pictures/", i);
+      // Two independent jobs: a chart picture with both requested gets both,
+      // so a failed chart call never leaves it with no description at all.
       boolean chartJob = options.getDoChartExtraction() && isChart(picture);
-      boolean describeJob =
-          !chartJob && options.getDoPictureDescription() && passesArea(picture, document, options);
-      boolean areaSkipped =
-          !chartJob
-              && options.getDoPictureDescription()
-              && !passesArea(picture, document, options);
-      if (!chartJob && !describeJob) {
-        if (areaSkipped) {
+      boolean describeJob = false;
+      if (options.getDoPictureDescription()) {
+        describeJob = passesArea(picture, document, options);
+        if (!describeJob) {
           skips.add(skip(selfRef, SkipReason.SKIP_REASON_BELOW_AREA_THRESHOLD,
               "picture area is below the configured threshold"));
         }
+      }
+      if (!chartJob && !describeJob) {
         continue;
       }
       VlmImage image = image(picture.getImage(), selfRef, crops);
@@ -171,7 +173,8 @@ public final class ItemSelector {
       }
       if (chartJob) {
         addChartWork(work, selfRef, image, i, options);
-      } else {
+      }
+      if (describeJob) {
         work.add(descriptionWork(selfRef, image, i, options));
       }
     }

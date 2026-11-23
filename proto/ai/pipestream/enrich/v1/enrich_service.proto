@@ -409,7 +409,8 @@ message EnrichComplete {
   uint32 skipped = 2;
   // Items that failed unexpectedly outside the VLM call. Normally zero; a
   // per-item failure that is not a clean skip lands here rather than failing
-  // the RPC.
+  // the RPC. Each one is reported as an ItemSkipped with
+  // SKIP_REASON_INTERNAL_ERROR.
   uint32 failed = 3;
   // The full document with the emitted annotations applied, present only
   // when EnrichOptions.return_document was true. Picture descriptions and
@@ -443,6 +444,11 @@ enum SkipReason {
   // link-local, or other non-public address. An operator allows such an
   // endpoint by listing its origin in ENRICH_VLM_ENDPOINT_ALLOWLIST.
   SKIP_REASON_ENDPOINT_REFUSED = 5;
+  // The server failed while enriching this item, outside the VLM call (a
+  // fault in this service, not in the endpoint or the request). The item is
+  // counted in EnrichComplete.failed, not skipped; the server log has the
+  // stack trace.
+  SKIP_REASON_INTERNAL_ERROR = 7;
 }
 
 // Picture-description model families served by the remote endpoint. UNSPECIFIED plus picture_description_preset_raw addresses

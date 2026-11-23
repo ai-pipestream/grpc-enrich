@@ -57,7 +57,8 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
       .setDescription("Document in, stream of typed ItemAnnotation enrichment events out")
       .build();
 
-  final AtomicLong enriched = new AtomicLong();
+  /** RPCs refused for size (RESOURCE_EXHAUSTED). What happened to accepted
+   * documents and their items is counted by the engine's EnrichMetrics. */
   final AtomicLong rejected = new AtomicLong();
 
   private final long maxDocumentBytes;
@@ -236,7 +237,6 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
 
       private void start(Document document) {
         started = true;
-        enriched.incrementAndGet();
         Map<String, ItemImage> cropsSnapshot = Map.copyOf(crops);
         executor.execute(() -> {
           engine.enrich(document, cropsSnapshot, options, this::emit, cancellation);
