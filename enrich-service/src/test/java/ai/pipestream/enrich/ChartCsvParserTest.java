@@ -28,9 +28,9 @@ class ChartCsvParserTest {
 
   @Test
   void quotedFieldsWithCommasAndQuotes() throws Exception {
-    TableData table = ChartCsvParser.parse("label,value\n\"a, b\",\"say \"\"hi\"\"\"");
-    assertThat(table.getTableCells(2).getText()).isEqualTo("a, b");
-    assertThat(table.getTableCells(3).getText()).isEqualTo("say \"hi\"");
+    TableData table = ChartCsvParser.parse("label,note,value\n\"a, b\",\"say \"\"hi\"\"\",7");
+    assertThat(table.getTableCells(3).getText()).isEqualTo("a, b");
+    assertThat(table.getTableCells(4).getText()).isEqualTo("say \"hi\"");
   }
 
   @Test

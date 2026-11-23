@@ -128,6 +128,10 @@ class RequestEndpointPolicyTest {
     try (FakeVlmServer operator = new FakeVlmServer();
         InProcessEnrich enrich = InProcessEnrich.start(
             new EndpointPolicy(operator.url() + "/v1", OPERATOR_KEY, false, Set.of()))) {
+      // The chart call must be answered with a table: prose is a skip.
+      operator.responder = body -> body.contains("<chart2csv>")
+          ? "year,sales\n2023,10"
+          : "fake description";
       Document document = Document.newBuilder()
           .setName("mixed")
           .addPictures(InProcessEnrich.picture("#/pictures/0").toBuilder()

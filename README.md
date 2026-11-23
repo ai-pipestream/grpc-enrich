@@ -194,7 +194,14 @@ patched `CodeItem`.
 
 Chart CSV becomes typed `TableData`: the first row is a column-header row
 only when all its values are non-numeric; any non-numeric data cell is marked
-`row_header=true` (an empty cell counts as non-numeric).
+`row_header=true` (an empty cell counts as non-numeric). A value is numeric
+when it is a number the way a chart prints one: plain, or with a currency
+symbol, a percent sign, or thousands separators (`45%`, `$1,200`). A reply
+that is not a table is never typed as one: fewer than two rows, no numeric
+cell anywhere, ragged rows, or a quote left open is an `ItemSkipped` with
+`SKIP_REASON_VLM_ERROR` and `chart_output` `CHART_OUTPUT_CSV`. That is where
+a model that answers the chart prompt with prose (a refusal, a description)
+lands.
 
 Generation budgets (`max_tokens`): description 200, code/formula 2048, chart
 4096 for every chart output (a wide table does not fit in 2048).
