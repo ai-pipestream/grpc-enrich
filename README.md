@@ -46,7 +46,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | Env | Default | Meaning |
 |---|---|---|
 | `ENRICH_PORT` | `50056` | gRPC listen port |
-| `ENRICH_HTTP_PORT` | `50068` | HTTP front-end listen port; `0` or empty disables the HTTP listener |
+| `ENRICH_HTTP_PORT` | unset (off) | HTTP front-end listen port. Off unless set: gRPC is the API, and the JSON shim opens only when an operator asks for it (`50068` is the port reserved for it). `0` or empty also leaves it off |
 | `ENRICH_VLM_URL` | unset | Default VLM endpoint: a base URL (`http://vlm:8080`; the client posts to `<url>/v1/chat/completions`) or a full endpoint URL (see [VLM endpoint URLs](#vlm-endpoint-urls)). Logs and `GetServiceInfo` show only its origin |
 | `ENRICH_VLM_API_KEY` | unset | Bearer token sent as `Authorization` to `ENRICH_VLM_URL` only, never to a per-request endpoint. Use it instead of a credential in the URL |
 | `ENRICH_VLM_MODEL` | unset | The model `ENRICH_VLM_URL` serves, for example `Qwen2.5-VL-7B-Instruct`. A general VLM (anything not a CodeFormula, granite-docling or SmolDocling model) gets formula images with a LaTeX prompt and the item's text layer as a hint, instead of the bare `<formula>` token it does not know. `EnrichOptions.formula_prompt` overrides per request. Unset keeps the token prompt |
@@ -56,7 +56,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Process-wide cap on concurrent VLM calls, shared by every request; also bounds `EnrichOptions.concurrency` |
 | `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included), and the ceiling on `EnrichOptions.timeout_seconds` |
-| `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables |
+| `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables. The line counts documents started and completed, items annotated and failed, and skips by reason (`docs{started=..,completed=..} items{annotated=..,failed=..} skipped{no_image=..,vlm_error=..,...} rpcs{rejected=..}`), so a VLM that is down reads as `annotated=0` with the items under `vlm_error`. Each distinct VLM failure message is also logged once at WARNING |
 
 The server registers `grpc.health.v1.Health` and server reflection (v1 and
 v1alpha).
@@ -85,7 +85,7 @@ OK and skips every item.
   NOT_SERVING.
 - **Where it shows.** `grpc.health.v1.Health/Check` and `Watch` (for `""`
   and `ai.pipestream.enrich.v1.EnrichService`), `GET /healthz` on the HTTP
-  front end, and `GetServiceInfoResponse.vlm_endpoints`: one typed
+  front end when it is on, and `GetServiceInfoResponse.vlm_endpoints`: one typed
   `VlmEndpointStatus` per probed endpoint with its origin, state, the reason
   when it is not serving, and the model ids it lists.
 
@@ -112,6 +112,14 @@ names its own reachable endpoint still works.
   `ItemSkipped` per item as that VLM call returns, `EnrichComplete` trailer.
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
   VLM call is an `ItemSkipped` (`SKIP_REASON_VLM_ERROR`), never an RPC error.
+  Every `ItemAnnotation` carries its `generation` (the model, the endpoint's
+  `finish_reason` verbatim, and that reason classified as `stop_reason`). A
+  reply the model stopped at its token limit is never passed off as whole: a
+  code or formula transcription, a chart table or chart code cut that way is
+  an `ItemSkipped` (`SKIP_REASON_OUTPUT_TRUNCATED`) and replaces nothing; a
+  picture description or chart summary is kept, with
+  `generation.stop_reason = VLM_STOP_REASON_LENGTH`. With `return_document`,
+  each patched item also gains that generation in its `source` list.
 - `GetServiceInfo`: versions, the default endpoint's origin, byte cap,
   process-wide concurrency cap, and the `UiInfo` frontend advertisement (tab
   title/path/tooltip) shared with the other ai-pipestream services.
@@ -121,8 +129,11 @@ names its own reachable endpoint still works.
 
 ## HTTP API
 
-The same binary also serves an HTTP front end on `ENRICH_HTTP_PORT` (default
-`50068`; set to `0` or empty to disable). It is a thin shim over the gRPC
+The same binary can also serve an HTTP front end, **off by default**: set
+`ENRICH_HTTP_PORT` (the fleet reserves `50068` for it) to turn it on. gRPC is
+the API; the shim takes the typed `Document` as JSON text and re-encodes it on
+the way in, so it is a convenience for callers that cannot speak gRPC, not a
+path fleet services use. It is a thin shim over the gRPC
 `EnrichServiceImpl`: requests are driven through the same streaming code
 path, so events, skip semantics, and the byte cap are identical. All bodies
 are canonical proto3 JSON (protobuf `JsonFormat`): camelCase or snake_case
@@ -155,7 +166,9 @@ parsed (from `Content-Length` when present, without reading the body).
   (`application/x-ndjson`): each `EnrichDocumentResponse` is written as one
   flushed line the moment the stream produces it, so HTTP callers see the
   same live per-item events gRPC clients get. A mid-stream failure ends the
-  response with a final `{"error": "..."}` line. When the client hangs up,
+  response with a final `{"error": "...", "code": "<gRPC status code>"}` line
+  (for example `UNAVAILABLE`); error bodies of both endpoints carry the same
+  `code` whenever the failure came from the RPC. When the client hangs up,
   the next event write fails and the call is cancelled, so its VLM calls
   stop.
 - `GET /healthz`: `200 ok` while a VLM the server depends on is answering,
@@ -185,7 +198,10 @@ applies the default 0.05, and a negative value disables the threshold.
 Pictures without provenance or a known page size are treated as full-page and
 always pass. Chart extraction runs when the picture's top figure-class
 prediction is one of the supported chart types (`bar_chart`, `pie_chart`,
-`line_chart`) or the picture carries the label `DOC_ITEM_LABEL_CHART`. Code
+`line_chart`) or the picture carries the label `DOC_ITEM_LABEL_CHART`. The
+two jobs are independent, as in Docling: a chart picture with both
+`do_picture_description` and `do_chart_extraction` set is described and
+extracted, and each job answers with its own event. Code
 and formula items are selected by their existing item labels; this service
 does not re-run layout.
 
@@ -218,7 +234,14 @@ the summary lands in the picture's `meta.description` and the code in
 Code and formula items are sent as image crops when an `ItemImage` is
 supplied for the item's `self_ref` (code items may also carry an inline
 data-URI `ImageRef`); without a crop, a text-only prompt with the existing
-item text is the fallback. Output is post-processed: truncate at
+item text is the fallback. Every annotation says which it was:
+`ItemAnnotation.input` is `ANNOTATION_INPUT_IMAGE` or
+`ANNOTATION_INPUT_TEXT_ONLY`, so a transcription written from the text layer
+alone never passes for one read off the page. A code item whose `ImageRef` is
+a non-data URI is skipped (`SKIP_REASON_UNFETCHABLE_URI`), not sent as text.
+`EnrichStarted.unmatched_images` counts the `ItemImage` crops whose
+`self_ref` names no picture, code or formula item; non-zero means the crop
+keys and the document disagree. Output is post-processed: truncate at
 `<end_of_utterance>`, strip `</code>` / `</formula>` / the `<loc_0>...`
 sentinel, lstrip, and parse the leading `<_language_>` token into
 `CodeAnnotation.language` (exact-case match against the document schema's
@@ -228,7 +251,14 @@ patched `CodeItem`.
 
 Chart CSV becomes typed `TableData`: the first row is a column-header row
 only when all its values are non-numeric; any non-numeric data cell is marked
-`row_header=true` (an empty cell counts as non-numeric).
+`row_header=true` (an empty cell counts as non-numeric). A value is numeric
+when it is a number the way a chart prints one: plain, or with a currency
+symbol, a percent sign, or thousands separators (`45%`, `$1,200`). A reply
+that is not a table is never typed as one: fewer than two rows, no numeric
+cell anywhere, ragged rows, or a quote left open is an `ItemSkipped` with
+`SKIP_REASON_VLM_ERROR` and `chart_output` `CHART_OUTPUT_CSV`. That is where
+a model that answers the chart prompt with prose (a refusal, a description)
+lands.
 
 Generation budgets (`max_tokens`): description 200, code/formula 2048, chart
 4096 for every chart output (a wide table does not fit in 2048).
@@ -240,7 +270,9 @@ picture descriptions only.
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
 retried up to 5 times with exponential backoff starting at 0.1s (or the
 endpoint's `Retry-After`), then the item is skipped with
-`SKIP_REASON_VLM_ERROR` rather than failing the RPC. The per-call timeout
+`SKIP_REASON_VLM_ERROR` rather than failing the RPC. An item this service
+itself failed on (a fault here, not in the endpoint) is an `ItemSkipped` with
+`SKIP_REASON_INTERNAL_ERROR`, counted in `EnrichComplete.failed`. The per-call timeout
 bounds the whole call, every attempt and every wait between them included: a
 retry that could not start before it passes is not made. A reply larger than
 4 MiB, or a call that does not finish within the per-call timeout, is a skip

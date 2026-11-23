@@ -56,23 +56,25 @@ class ChartCsvParserAdversarialTest {
   }
 
   @Test
-  void singleRowAllNumeric_noHeader() throws Exception {
-    TableData table = ChartCsvParser.parse("1,2,3");
-    assertThat(table.getNumRows()).isEqualTo(1);
-    assertThat(table.getNumCols()).isEqualTo(3);
-    for (int i = 0; i < 3; i++) {
-      assertThat(table.getTableCells(i).getColumnHeader()).isFalse();
-      assertThat(table.getTableCells(i).getRowHeader()).isFalse();
-    }
+  void singleRow_rejected() {
+    // One row cannot be both a header and data, so it is not a chart table.
+    assertThatThrownBy(() -> ChartCsvParser.parse("1,2,3")).isInstanceOf(VlmException.class);
   }
 
   @Test
   void singleColumn() throws Exception {
-    TableData table = ChartCsvParser.parse("name\nalpha\nbeta");
+    TableData table = ChartCsvParser.parse("sales\n10\n12");
     assertThat(table.getNumRows()).isEqualTo(3);
     assertThat(table.getNumCols()).isEqualTo(1);
     assertThat(table.getTableCells(0).getColumnHeader()).isTrue();
-    assertThat(table.getTableCells(2).getText()).isEqualTo("beta");
+    assertThat(table.getTableCells(2).getText()).isEqualTo("12");
+  }
+
+  @Test
+  void singleColumnOfWords_rejected() {
+    // No number anywhere: a list of words, not chart data.
+    assertThatThrownBy(() -> ChartCsvParser.parse("name\nalpha\nbeta"))
+        .isInstanceOf(VlmException.class);
   }
 
   @Test
@@ -114,10 +116,12 @@ class ChartCsvParserAdversarialTest {
   }
 
   @Test
-  void unterminatedQuote_lenientSingleRow() throws Exception {
-    TableData table = ChartCsvParser.parse("\"a,b");
-    assertThat(table.getNumRows()).isEqualTo(1);
-    assertThat(table.getTableCells(0).getText()).isEqualTo("a,b");
+  void unterminatedQuote_rejected() {
+    // The open quote reads the rest of the reply into one cell; that is a
+    // damaged table, not a lenient one.
+    assertThatThrownBy(() -> ChartCsvParser.parse("\"a,b")).isInstanceOf(VlmException.class);
+    assertThatThrownBy(() -> ChartCsvParser.parse("a,b\n1,\"2\n3,4"))
+        .isInstanceOf(VlmException.class);
   }
 
   @Test

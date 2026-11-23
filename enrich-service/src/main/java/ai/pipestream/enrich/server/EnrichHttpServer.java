@@ -36,11 +36,17 @@ import java.util.concurrent.LinkedBlockingQueue;
  * "item_images":…}} envelope into the sub-documents JsonFormat then parses.
  * GetServiceInfo stays gRPC-only.
  *
+ * <p><b>Off by default.</b> This is a convenience door, not the API: it
+ * takes the typed Document as JSON text and re-encodes it on the way in, so
+ * it listens only when the operator sets ENRICH_HTTP_PORT. Fleet callers
+ * (gRParse, the demo shell) speak gRPC to the typed service.
+ *
  * <p>Endpoints: {@code POST /v1/enrich} collects every stream event and
  * returns them as one {@code {"events":[…]}} JSON document;
  * {@code POST /v1/enrich/stream} answers chunked NDJSON, one flushed line per
  * EnrichDocumentResponse event as the stream produces it, with a final
- * {@code {"error":…}} line when the stream fails mid-flight;
+ * {@code {"error":…,"code":…}} line (the gRPC status code by name) when the
+ * stream fails mid-flight;
  * {@code GET /healthz} answers 200 "ok" while a VLM this server depends on
  * is answering and 503 "not serving" while none is, the same answer
  * {@code grpc.health.v1} gives.
@@ -262,7 +268,7 @@ public final class EnrichHttpServer implements AutoCloseable {
         events.add(event);
       } else if (item instanceof Throwable error) {
         Status status = Status.fromThrowable(error);
-        sendError(exchange, httpStatus(status), status.getDescription());
+        sendJson(exchange, httpStatus(status), errorJson(status));
         return;
       } else {
         break;
@@ -317,10 +323,11 @@ public final class EnrichHttpServer implements AutoCloseable {
         Status status = Status.fromThrowable(error);
         if (out == null) {
           // Failed before the first event: a real HTTP status still applies.
-          sendError(exchange, httpStatus(status), status.getDescription());
+          sendJson(exchange, httpStatus(status), errorJson(status));
         } else {
-          out.write(("{\"error\":" + quote(status.getDescription()) + "}\n")
-              .getBytes(StandardCharsets.UTF_8));
+          // The response is already 200, so this line is the only place the
+          // failure's status can travel.
+          out.write((errorJson(status) + "\n").getBytes(StandardCharsets.UTF_8));
           out.flush();
           out.close();
         }
@@ -364,6 +371,16 @@ public final class EnrichHttpServer implements AutoCloseable {
   private static void sendError(HttpExchange exchange, int status, String message)
       throws IOException {
     sendJson(exchange, status, "{\"error\":" + quote(message) + "}");
+  }
+
+  /**
+   * The error object for a failed RPC: its description and its gRPC status
+   * code by name, so the code is never dropped on the way to an HTTP caller
+   * ({@code {"error":"...","code":"UNAVAILABLE"}}).
+   */
+  public static String errorJson(Status status) throws InvalidProtocolBufferException {
+    return "{\"error\":" + quote(status.getDescription())
+        + ",\"code\":" + quote(status.getCode().name()) + "}";
   }
 
   /** JSON-quotes a string with JsonFormat rather than by hand. */

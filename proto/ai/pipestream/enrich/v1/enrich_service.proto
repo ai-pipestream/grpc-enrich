@@ -32,7 +32,10 @@ option java_package = "ai.pipestream.enrich.v1";
 // Document are INVALID_ARGUMENT. A per-request VLM endpoint the server's
 // operator has not allowed is PERMISSION_DENIED. A failed VLM call is NOT
 // an RPC error: the item is reported as ItemSkipped with reason
-// SKIP_REASON_VLM_ERROR and the remaining items continue.
+// SKIP_REASON_VLM_ERROR and the remaining items continue. A stream that ends
+// OK always carries its EnrichComplete trailer: a server fault outside any
+// one item ends the RPC INTERNAL, and an enrichment the server had to stop
+// before the trailer (it is shutting down) ends it UNAVAILABLE.
 service EnrichService {
   // Enriches one document. The client sends exactly one EnrichOptions message
   // first (carrying the document inline, or followed by DocumentChunk
@@ -284,6 +287,13 @@ message EnrichStarted {
   uint32 code_enrichments = 3;
   // Formula items selected for enrichment.
   uint32 formula_enrichments = 4;
+  // ItemImage crops whose self_ref names no picture, code or formula item of
+  // the document, so their bytes reached nothing. Non-zero means the caller's
+  // crop keys and the document's self_refs disagree; the items those crops
+  // were meant for are enriched without them (ANNOTATION_INPUT_TEXT_ONLY) or
+  // skipped (SKIP_REASON_NO_IMAGE). A crop for an item whose job is switched
+  // off is not counted.
+  uint32 unmatched_images = 5;
 }
 
 // The annotation produced for one item, keyed by the item's self_ref so the
@@ -309,6 +319,32 @@ message ItemAnnotation {
     // Python code that recreates a chart (ChartExtractionOptions.code).
     ChartCode chart_code = 8;
   }
+  // The generation that produced the annotation: the model, the endpoint's
+  // finish_reason verbatim, and that reason classified as stop_reason. Set on
+  // every annotation. A picture description or chart summary whose
+  // stop_reason is VLM_STOP_REASON_LENGTH ends where the token limit cut it;
+  // the other annotation kinds are never emitted from a length-stopped reply
+  // (SKIP_REASON_OUTPUT_TRUNCATED). The endpoint is never named here.
+  ai.pipestream.document.v1.GenerationSource generation = 9;
+  // What the model was given to produce the annotation. Set on every
+  // annotation. A code or formula annotation marked
+  // ANNOTATION_INPUT_TEXT_ONLY was written from the item's existing text
+  // alone, without the item's image.
+  AnnotationInput input = 10;
+}
+
+// What a VLM call was given for an item.
+enum AnnotationInput {
+  // Never emitted; the zero value required by proto3.
+  ANNOTATION_INPUT_UNSPECIFIED = 0;
+  // The item's image (an ItemImage crop or an inline data URI) went with the
+  // prompt.
+  ANNOTATION_INPUT_IMAGE = 1;
+  // No image was available for the item, so the prompt carried only the
+  // item's existing text (code and formula items; the documented fallback
+  // when the caller supplies no crop). The result is a rewrite of that text,
+  // not a reading of the page.
+  ANNOTATION_INPUT_TEXT_ONLY = 2;
 }
 
 // A VLM-generated description of a picture.
@@ -406,12 +442,13 @@ enum ChartOutput {
 message EnrichComplete {
   // Annotations emitted (one per chart output for a multi-output chart).
   uint32 succeeded = 1;
-  // Skips emitted (no image, below threshold, or VLM error; one per chart
-  // output that failed).
+  // Skips emitted (no image, below threshold, VLM error, or a reply cut at
+  // the token limit; one per chart output that failed).
   uint32 skipped = 2;
   // Items that failed unexpectedly outside the VLM call. Normally zero; a
   // per-item failure that is not a clean skip lands here rather than failing
-  // the RPC.
+  // the RPC. Each one is reported as an ItemSkipped with
+  // SKIP_REASON_INTERNAL_ERROR.
   uint32 failed = 3;
   // The full document with the emitted annotations applied, present only
   // when EnrichOptions.return_document was true. Picture descriptions and
@@ -445,6 +482,17 @@ enum SkipReason {
   // link-local, or other non-public address. An operator allows such an
   // endpoint by listing its origin in ENRICH_VLM_ENDPOINT_ALLOWLIST.
   SKIP_REASON_ENDPOINT_REFUSED = 5;
+  // The model stopped at its output token limit (finish_reason "length")
+  // before finishing a reply that is only usable whole: a code or formula
+  // transcription, a chart table, chart code. The partial reply is not
+  // emitted and never replaces item text; raise VlmGenerationParams.max_tokens
+  // to give the model room.
+  SKIP_REASON_OUTPUT_TRUNCATED = 6;
+  // The server failed while enriching this item, outside the VLM call (a
+  // fault in this service, not in the endpoint or the request). The item is
+  // counted in EnrichComplete.failed, not skipped; the server log has the
+  // stack trace.
+  SKIP_REASON_INTERNAL_ERROR = 7;
 }
 
 // Picture-description model families served by the remote endpoint. UNSPECIFIED plus picture_description_preset_raw addresses

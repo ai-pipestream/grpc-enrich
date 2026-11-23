@@ -227,7 +227,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
   }
 
   @Override
-  public String complete(VlmRequest call) throws VlmException {
+  public VlmReply complete(VlmRequest call) throws VlmException {
     HttpRequest request = buildRequest(call);
     // Differences of nanoTime stay correct across overflow, so even a
     // Long.MAX_VALUE budget needs no special case.
@@ -258,7 +258,7 @@ public final class OpenAiCompatVlmClient implements VlmClient {
         }
         throw failed;
       }
-      return extractContent(body);
+      return extractReply(body);
     }
   }
 
@@ -438,8 +438,9 @@ public final class OpenAiCompatVlmClient implements VlmClient {
         HttpRequest.BodyPublishers.ofByteArray(tail.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
-  /** Reads choices[0].message.content out of the chat-completions reply. */
-  static String extractContent(String body) throws VlmException {
+  /** Reads choices[0].message.content and choices[0].finish_reason out of
+   * the chat-completions reply. */
+  static VlmReply extractReply(String body) throws VlmException {
     final Map<String, Object> root;
     try {
       root = Json.asObject(Json.parse(body));
@@ -453,11 +454,23 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       List<Object> choices = Json.asArray(root.get("choices"));
       Map<String, Object> first = Json.asObject(choices.get(0));
       Map<String, Object> message = Json.asObject(first.get("message"));
-      return Json.asString(message.get("content"));
+      return new VlmReply(Json.asString(message.get("content")),
+          finishReason(first.get("finish_reason")));
     } catch (RuntimeException shape) {
       throw new VlmException("VLM response had no choices[0].message.content", snippet(body),
           shape);
     }
+  }
+
+  /** choices[0].finish_reason when it is a reason: a non-empty string no
+   * longer than {@link VlmReply#MAX_FINISH_REASON_CHARS}. Servers that do
+   * not report one send null or leave the field out. */
+  private static Optional<String> finishReason(Object value) {
+    return value instanceof String reason
+        && !reason.isEmpty()
+        && reason.length() <= VlmReply.MAX_FINISH_REASON_CHARS
+        ? Optional.of(reason)
+        : Optional.empty();
   }
 
   private static String snippet(String body) {

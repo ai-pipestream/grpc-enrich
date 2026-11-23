@@ -25,8 +25,9 @@ import java.util.concurrent.TimeUnit;
  */
 public final class GrpcEnrichServer {
 
-  /** Default port for the HTTP front end when ENRICH_HTTP_PORT is unset. */
-  static final int DEFAULT_HTTP_PORT = EnrichConfig.DEFAULT_HTTP_PORT;
+  /** The port reserved for the HTTP front end; off unless ENRICH_HTTP_PORT
+   * is set. */
+  static final int RESERVED_HTTP_PORT = EnrichConfig.RESERVED_HTTP_PORT;
 
   /** How long one VLM health probe may take before the endpoint counts as
    * not serving. */
@@ -59,7 +60,7 @@ public final class GrpcEnrichServer {
     Server server = startGrpcServer(config, service, health);
     vlmHealth.start();
     EnrichHttpServer httpServer = startHttpServer(config, service, executor);
-    ScheduledExecutorService metrics = startMetrics(config, service);
+    ScheduledExecutorService metrics = startMetrics(config, service, engine);
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
       vlmHealth.close();
@@ -112,23 +113,34 @@ public final class GrpcEnrichServer {
         + config.maxConcurrentVlm() + " concurrent VLM calls)";
   }
 
-  /** Starts the HTTP front end, or returns null when it is disabled. */
+  /** Starts the HTTP front end, or returns null when it is disabled (the
+   * default). Either way the log says which. */
   private static EnrichHttpServer startHttpServer(
       EnrichConfig config, EnrichServiceImpl service, ExecutorService executor)
       throws IOException {
     if (config.httpPort() == null) {
+      System.out.println(httpLine(null));
       return null;
     }
     EnrichHttpServer httpServer = new EnrichHttpServer(config.httpPort(), service, executor);
     httpServer.start();
-    System.out.println("grpc-enrich HTTP front end listening on 0.0.0.0:" + httpServer.getPort()
-        + " (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz)");
+    System.out.println(httpLine(httpServer.getPort()));
     return httpServer;
+  }
+
+  /** The startup line for the HTTP front end: where it listens, or that it
+   * is off and how to turn it on. */
+  static String httpLine(Integer port) {
+    return port == null
+        ? "grpc-enrich HTTP front end disabled; gRPC is the API (set ENRICH_HTTP_PORT="
+            + RESERVED_HTTP_PORT + " to serve the JSON shim)"
+        : "grpc-enrich HTTP front end listening on 0.0.0.0:" + port
+            + " (POST /v1/enrich, POST /v1/enrich/stream, GET /healthz)";
   }
 
   /** Schedules the periodic metrics line, or returns null when disabled. */
   private static ScheduledExecutorService startMetrics(
-      EnrichConfig config, EnrichServiceImpl service) {
+      EnrichConfig config, EnrichServiceImpl service, EnrichmentEngine engine) {
     long seconds = config.metricsInterval().toSeconds();
     if (seconds <= 0) {
       return null;
@@ -139,9 +151,15 @@ public final class GrpcEnrichServer {
       return thread;
     });
     metrics.scheduleAtFixedRate(
-        () -> System.out.println("grpc-enrich metrics: docs{enriched=" + service.enriched.get()
-            + ",rejected=" + service.rejected.get() + "}"),
+        () -> System.out.println(metricsLine(service, engine)),
         seconds, seconds, TimeUnit.SECONDS);
     return metrics;
+  }
+
+  /** The periodic metrics line: what happened to the items (annotated,
+   * failed, skipped by reason), not only that documents arrived. */
+  static String metricsLine(EnrichServiceImpl service, EnrichmentEngine engine) {
+    return "grpc-enrich metrics: " + engine.metrics().line()
+        + " rpcs{rejected=" + service.rejected.get() + "}";
   }
 }

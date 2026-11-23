@@ -7,12 +7,16 @@ import ai.pipestream.document.v1.CodeMetaField;
 import ai.pipestream.document.v1.DescriptionMetaField;
 import ai.pipestream.document.v1.DescriptionAnnotation;
 import ai.pipestream.document.v1.Document;
+import ai.pipestream.document.v1.GenerationSource;
 import ai.pipestream.document.v1.PictureAnnotation;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.PictureTabularChartData;
+import ai.pipestream.document.v1.SourceType;
 import ai.pipestream.enrich.engine.ItemSelector.Kind;
 import ai.pipestream.enrich.engine.ItemSelector.Selection;
 import ai.pipestream.enrich.engine.ItemSelector.WorkItem;
+import ai.pipestream.enrich.v1.AnnotationInput;
+import ai.pipestream.enrich.v1.ChartOutput;
 import ai.pipestream.enrich.v1.EnrichComplete;
 import ai.pipestream.enrich.v1.EnrichDocumentResponse;
 import ai.pipestream.enrich.v1.EnrichOptions;
@@ -26,6 +30,7 @@ import ai.pipestream.enrich.v1.VlmHeader;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.Header;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmReply;
 import ai.pipestream.enrich.vlm.VlmClient.VlmRequest;
 import ai.pipestream.enrich.vlm.PublicAddress;
 import ai.pipestream.enrich.vlm.VlmEndpoint;
@@ -104,6 +109,7 @@ public final class EnrichmentEngine {
   private final Semaphore processSlots;
   /** Resolves a caller endpoint's host for the public-address check. */
   private final PublicAddress.Resolver resolver;
+  private final EnrichMetrics metrics = new EnrichMetrics();
 
   /** An engine whose only endpoint is {@code defaultEndpoint}: no key, and
    * per-request endpoints refused. */
@@ -376,26 +382,39 @@ public final class EnrichmentEngine {
    * produced. {@code emit} must be thread-safe: item events arrive from
    * worker threads. Returns after the EnrichComplete trailer has been
    * emitted.
+   *
+   * @return true when the EnrichComplete trailer was emitted
    */
-  public void enrich(
+  public boolean enrich(
       Document document,
       Map<String, ItemImage> crops,
       EnrichOptions options,
       Consumer<EnrichDocumentResponse> emit) {
-    enrich(document, crops, options, emit, new Cancellation());
+    return enrich(document, crops, options, emit, new Cancellation());
   }
 
   /**
    * {@link #enrich(Document, Map, EnrichOptions, Consumer)} that stops when
    * {@code cancellation} is cancelled: in-flight VLM calls are interrupted,
-   * queued ones never start, and it returns without a trailer.
+   * queued ones never start, and it returns without a trailer. The calling
+   * thread being interrupted (a server shutting down) cancels it the same
+   * way.
+   *
+   * @return true when the EnrichComplete trailer was emitted; false when the
+   *     enrichment was cancelled or interrupted first, so the stream it fed
+   *     is incomplete
    */
-  public void enrich(
+  public boolean enrich(
       Document document,
       Map<String, ItemImage> crops,
       EnrichOptions options,
-      Consumer<EnrichDocumentResponse> emit,
+      Consumer<EnrichDocumentResponse> caller,
       Cancellation cancellation) {
+    // Every event is counted on its way out, so the metrics are the events.
+    Consumer<EnrichDocumentResponse> emit = event -> {
+      observe(event);
+      caller.accept(event);
+    };
     Selection selection = ItemSelector.select(document, crops,
         FormulaPrompts.resolve(options, endpoints.servedModel()));
     emit.accept(event(EnrichStarted.newBuilder()
@@ -403,6 +422,7 @@ public final class EnrichmentEngine {
         .setChartExtractions((int) selection.count(Kind.CHART))
         .setCodeEnrichments((int) selection.count(Kind.CODE))
         .setFormulaEnrichments((int) selection.count(Kind.FORMULA))
+        .setUnmatchedImages(selection.unmatchedImages())
         .build()));
 
     AtomicInteger succeeded = new AtomicInteger();
@@ -434,7 +454,7 @@ public final class EnrichmentEngine {
       clients.values().forEach(VlmClient::close);
     }
     if (cancellation.isCancelled()) {
-      return;
+      return false;
     }
 
     EnrichComplete.Builder complete = EnrichComplete.newBuilder()
@@ -445,6 +465,26 @@ public final class EnrichmentEngine {
       complete.setDocument(applyPatches(document, enriched));
     }
     emit.accept(event(complete.build()));
+    return true;
+  }
+
+  /** The process-wide counts of what this engine's enrichments did. */
+  public EnrichMetrics metrics() {
+    return metrics;
+  }
+
+  /** Counts {@code event}, and logs a VLM failure the first time its message
+   * is seen: the caller gets every skip, the server log one line per kind of
+   * failure. The detail is already the safe message for a caller endpoint. */
+  private void observe(EnrichDocumentResponse event) {
+    metrics.record(event);
+    if (event.hasSkipped()
+        && event.getSkipped().getReason() == SkipReason.SKIP_REASON_VLM_ERROR
+        && metrics.firstSighting(event.getSkipped().getDetail())) {
+      LOG.log(System.Logger.Level.WARNING, "VLM call failed for "
+          + event.getSkipped().getSelfRef() + ": " + event.getSkipped().getDetail()
+          + " (logged once per distinct failure; counts are on the metrics line)");
+    }
   }
 
   /** The request's concurrency, within the server's cap. The field is uint32
@@ -633,7 +673,7 @@ public final class EnrichmentEngine {
     WorkItem item = call.item();
     try {
       VlmGenerationParams sampling = item.sampling();
-      String content = call.client().complete(new VlmRequest(
+      VlmReply reply = call.client().complete(new VlmRequest(
           item.model(),
           item.prompt(),
           item.image(),
@@ -644,9 +684,25 @@ public final class EnrichmentEngine {
           sampling.hasSeed() ? OptionalLong.of(sampling.getSeed()) : OptionalLong.empty(),
           call.headers(),
           timeout));
+      if (reply.truncated() && !usableWhenCut(item)) {
+        // The reply stopped at the token limit. A cut transcription or a
+        // table missing its last rows looks exactly like a complete one, so
+        // it is never emitted and never replaces the item's text.
+        skipped.incrementAndGet();
+        emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_OUTPUT_TRUNCATED,
+            "the model stopped at its " + item.maxTokens()
+                + "-token output limit before finishing; the partial reply was not used"));
+        return;
+      }
+      String content = reply.content();
+      GenerationSource.Builder generation = GenerationSource.newBuilder()
+          .setModel(item.model())
+          .setStopReason(reply.stopReason());
+      reply.finishReason().ifPresent(generation::setFinishReason);
       ItemAnnotation.Builder annotation = ItemAnnotation.newBuilder()
           .setSelfRef(item.selfRef())
-          .setModel(item.model());
+          .setModel(item.model())
+          .setGeneration(generation);
       switch (item.kind()) {
         case DESCRIPTION -> annotation.getDescriptionBuilder().setText(content);
         case CHART -> chartAnnotation(item, content, annotation);
@@ -661,6 +717,12 @@ public final class EnrichmentEngine {
         case FORMULA -> annotation.getFormulaBuilder()
             .setText(FormulaReply.text(item.prompt(), content));
       }
+      // What the model was given: a text-only call rewrites the item's text
+      // without seeing the page, and its annotation must not pass for a
+      // reading of the image.
+      annotation.setInput(item.image() == null
+          ? AnnotationInput.ANNOTATION_INPUT_TEXT_ONLY
+          : AnnotationInput.ANNOTATION_INPUT_IMAGE);
       ItemAnnotation built = annotation.build();
       succeeded.incrementAndGet();
       enriched.add(new EnrichedItem(item, built));
@@ -674,6 +736,17 @@ public final class EnrichmentEngine {
     }
   }
 
+  /** True for the outputs that are prose: a description or a chart summary
+   * cut at the token limit is still a description of the picture, and its
+   * annotation says it was cut. Every other output is only right whole. */
+  private static boolean usableWhenCut(WorkItem item) {
+    return switch (item.kind()) {
+      case DESCRIPTION -> true;
+      case CHART -> item.chartOutput() == ChartOutput.CHART_OUTPUT_SUMMARY;
+      case CODE, FORMULA -> false;
+    };
+  }
+
   /** Counts, logs, and reports a failure no VLM error accounts for. The log
    * keeps the stack trace; the event names only the type for a caller-chosen
    * endpoint, whose bytes the message may carry. */
@@ -682,7 +755,7 @@ public final class EnrichmentEngine {
     failed.incrementAndGet();
     LOG.log(System.Logger.Level.ERROR,
         "unexpected failure enriching " + call.item().selfRef(), failure);
-    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_UNSPECIFIED,
+    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_INTERNAL_ERROR,
         "unexpected failure enriching this item: " + (call.callerChosen()
             ? failure.getClass().getSimpleName()
             : failure.toString())));
@@ -724,7 +797,9 @@ public final class EnrichmentEngine {
   /** Applies the emitted annotations to a copy of the document. Additive
    * only: provenance boxes and orig text are never rewritten. Each patch
    * lands on the item whose VLM call produced it, keyed by document index —
-   * not by self_ref, which pathological documents can duplicate. */
+   * not by self_ref, which pathological documents can duplicate. The item
+   * also gains the generation as a source, which is where the document says
+   * a description was cut at the token limit. */
   private static Document applyPatches(
       Document document, ConcurrentLinkedQueue<EnrichedItem> enriched) {
     Document.Builder patched = document.toBuilder();
@@ -740,11 +815,12 @@ public final class EnrichmentEngine {
                       .setKind("description")
                       .setText(annotation.getDescription().getText())
                       .setProvenance(annotation.getModel())))
+              .addSource(generatedBy(annotation))
               .build());
         }
         case CHART -> {
           PictureItem picture = patched.getPictures(item.pictureIndex());
-          PictureItem.Builder updated = picture.toBuilder();
+          PictureItem.Builder updated = picture.toBuilder().addSource(generatedBy(annotation));
           switch (annotation.getAnnotationCase()) {
             case CHART_SUMMARY -> {
               updated.addAnnotations(PictureAnnotation.newBuilder()
@@ -780,7 +856,8 @@ public final class EnrichmentEngine {
           BaseTextItem text = patched.getTexts(item.textIndex());
           CodeItem.Builder code = text.getCode().toBuilder()
               .setText(annotation.getCode().getText())
-              .setCodeLanguage(annotation.getCode().getLanguage());
+              .setCodeLanguage(annotation.getCode().getLanguage())
+              .addSource(generatedBy(annotation));
           if (!annotation.getCode().getLanguageRaw().isEmpty()) {
             code.setCodeLanguageRaw(annotation.getCode().getLanguageRaw());
           }
@@ -791,7 +868,8 @@ public final class EnrichmentEngine {
           patched.setTexts(item.textIndex(), text.toBuilder()
               .setFormula(text.getFormula().toBuilder()
                   .setBase(text.getFormula().getBase().toBuilder()
-                      .setText(annotation.getFormula().getText())))
+                      .setText(annotation.getFormula().getText())
+                      .addSource(generatedBy(annotation))))
               .build());
         }
       }
@@ -805,6 +883,12 @@ public final class EnrichmentEngine {
 
   private static EnrichDocumentResponse event(EnrichComplete complete) {
     return EnrichDocumentResponse.newBuilder().setComplete(complete).build();
+  }
+
+  /** The source entry that attributes an applied annotation to the
+   * generation that produced it. */
+  private static SourceType generatedBy(ItemAnnotation annotation) {
+    return SourceType.newBuilder().setGeneration(annotation.getGeneration()).build();
   }
 
   private static EnrichDocumentResponse skippedEvent(

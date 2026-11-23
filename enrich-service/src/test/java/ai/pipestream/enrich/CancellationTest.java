@@ -8,6 +8,7 @@ import ai.pipestream.enrich.v1.EnrichDocumentRequest;
 import ai.pipestream.enrich.v1.EnrichOptions;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmReply;
 import com.google.protobuf.util.JsonFormat;
 import io.grpc.Status;
 import io.grpc.stub.ClientCallStreamObserver;
@@ -48,7 +49,7 @@ class CancellationTest {
         started.incrementAndGet();
         try {
           Thread.sleep(Duration.ofMinutes(5));
-          return "never";
+          return VlmReply.of("never");
         } catch (InterruptedException interrupt) {
           interrupted.incrementAndGet();
           Thread.currentThread().interrupt();

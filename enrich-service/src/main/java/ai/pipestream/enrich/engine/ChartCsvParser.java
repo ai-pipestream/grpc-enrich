@@ -16,7 +16,15 @@ import java.util.regex.Pattern;
  *
  * <p>Typing rules: the first row is a column-header row only when ALL its
  * values are non-numeric; any non-numeric data cell is marked
- * row_header=true; spans are 1x1 and no bbox is set.
+ * row_header=true; spans are 1x1 and no bbox is set. A value is numeric the
+ * way a chart prints numbers: a plain number, or one with a currency symbol,
+ * a percent sign, or thousands separators ({@code $1,200}, {@code 45%}).
+ *
+ * <p>What is not a chart table is refused, never typed: a reply with fewer
+ * than two rows, with no numeric cell at all, with ragged rows, or with a
+ * quote left open. A model that answers the chart prompt with prose ("I'm
+ * sorry, I cannot read this chart.") lands there, so the caller gets an
+ * ItemSkipped rather than a one-row "table".
  */
 public final class ChartCsvParser {
 
@@ -27,6 +35,11 @@ public final class ChartCsvParser {
       Pattern.compile("```csv\\s*\\n(.*?)\\n```", Pattern.DOTALL);
   private static final Pattern LEADING_FENCE = Pattern.compile("^`{3,}(?:csv)?\\s*");
   private static final Pattern TRAILING_FENCE = Pattern.compile("`{3,}\\s*$");
+
+  /** A plain decimal, with or without thousands separators: 1200, 1,200,
+   * 1,200.50, .5, 3e6. */
+  private static final Pattern PLAIN_NUMBER = Pattern.compile(
+      "(?:\\d{1,3}(?:,\\d{3})+|\\d+)?(?:\\.\\d*)?(?:[eE][+-]?\\d+)?");
 
   private ChartCsvParser() {}
 
@@ -50,7 +63,9 @@ public final class ChartCsvParser {
    * Parses CSV text (RFC 4180-ish: quoted fields, embedded commas and quotes)
    * into a TableData, inferring the header row from numeric content.
    *
-   * @throws VlmException when the text is empty or the rows are ragged
+   * @throws VlmException when the text is not a chart table: it is empty,
+   *     has a single row, has no numeric cell, has ragged rows, or leaves a
+   *     quote open
    */
   public static TableData parse(String csv) throws VlmException {
     List<List<String>> rows = parseRows(csv);
@@ -65,6 +80,14 @@ public final class ChartCsvParser {
       if (row.size() != numCols) {
         throw new VlmException("chart model returned ragged CSV rows");
       }
+    }
+    if (rows.size() < 2) {
+      // One row is a header with no data or data with no header; prose with
+      // a comma in it parses as exactly this.
+      throw new VlmException("chart model returned a single row, not a table with data rows");
+    }
+    if (rows.stream().noneMatch(row -> row.stream().anyMatch(ChartCsvParser::isNumeric))) {
+      throw new VlmException("chart model returned a table with no numeric value in any cell");
     }
     boolean firstRowIsHeader = rows.get(0).stream().allMatch(value -> !isNumeric(value));
     TableData.Builder table = TableData.newBuilder()
@@ -94,22 +117,56 @@ public final class ChartCsvParser {
     return table.build();
   }
 
-  /** A value is numeric when it parses as a double; empty cells count as
-   * non-numeric. */
+  /** A value is numeric when it parses as a double, or when it is a number
+   * the way a chart prints one: an optional sign, a currency symbol before
+   * or after, a trailing percent sign, thousands separators. Empty cells
+   * count as non-numeric, and so does any value with other words in it. */
   private static boolean isNumeric(String value) {
-    String trimmed = value.trim();
+    String trimmed = value.strip();
     if (trimmed.isEmpty()) {
       return false;
     }
     try {
       Double.parseDouble(trimmed);
       return true;
-    } catch (NumberFormatException notNumeric) {
-      return false;
+    } catch (NumberFormatException notADouble) {
+      return isPrintedNumber(trimmed);
     }
   }
 
-  private static List<List<String>> parseRows(String csv) {
+  /** {@code -3.5%}, {@code $1,200}, {@code 980 €}: a sign, then a plain
+   * number with at most a currency symbol on either side and a percent sign
+   * after it. */
+  private static boolean isPrintedNumber(String value) {
+    int start = 0;
+    int end = value.length();
+    if (start < end && (value.charAt(start) == '+' || value.charAt(start) == '-')) {
+      start++;
+    }
+    if (start < end && Character.getType(value.charAt(start)) == Character.CURRENCY_SYMBOL) {
+      start++;
+    } else if (end > start
+        && Character.getType(value.charAt(end - 1)) == Character.CURRENCY_SYMBOL) {
+      end--;
+    }
+    while (start < end && Character.isWhitespace(value.charAt(start))) {
+      start++;
+    }
+    while (end > start && Character.isWhitespace(value.charAt(end - 1))) {
+      end--;
+    }
+    if (end > start && value.charAt(end - 1) == '%') {
+      end--;
+      while (end > start && Character.isWhitespace(value.charAt(end - 1))) {
+        end--;
+      }
+    }
+    String number = value.substring(start, end);
+    return number.chars().anyMatch(Character::isDigit)
+        && PLAIN_NUMBER.matcher(number).matches();
+  }
+
+  private static List<List<String>> parseRows(String csv) throws VlmException {
     List<List<String>> rows = new ArrayList<>();
     List<String> row = new ArrayList<>();
     StringBuilder field = new StringBuilder();
@@ -150,6 +207,11 @@ public final class ChartCsvParser {
         field.append(c);
         hasContent = true;
       }
+    }
+    if (inQuotes) {
+      // Everything after the open quote was read into one cell, row breaks
+      // included; the rows that follow it are gone.
+      throw new VlmException("chart model returned CSV with a quote that is never closed");
     }
     if (hasContent || !row.isEmpty()) {
       row.add(field.toString());

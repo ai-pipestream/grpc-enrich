@@ -19,6 +19,7 @@ import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.SkipReason;
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
 import ai.pipestream.enrich.vlm.VlmClient;
+import ai.pipestream.enrich.vlm.VlmClient.VlmReply;
 import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -255,7 +256,7 @@ class EnrichStreamAdversarialTest {
       if (calls.incrementAndGet() == 2) {
         throw new OutOfMemoryError("simulated: encoding a crop");
       }
-      return "a picture";
+      return VlmReply.of("a picture");
     };
     try (InProcessEnrich enrich = InProcessEnrich.start(clients,
         EndpointPolicy.defaultOnly("http://vlm.invalid"), 1, 16, Duration.ofSeconds(10),
@@ -271,7 +272,9 @@ class EnrichStreamAdversarialTest {
       assertThat(result.events().get(0).getStarted().getPictureDescriptions()).isEqualTo(3);
       assertThat(result.annotations()).hasSize(2);
       assertThat(result.skips()).singleElement().satisfies(skip -> {
-        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_UNSPECIFIED);
+        // Never the zero value: a client that switches on reason must be able
+        // to tell a server fault from a skip.
+        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_INTERNAL_ERROR);
         assertThat(skip.getDetail()).contains("OutOfMemoryError");
       });
       assertThat(result.complete().getSucceeded()).isEqualTo(2);

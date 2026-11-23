@@ -13,6 +13,7 @@ import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
 import ai.pipestream.enrich.vlm.PublicAddress;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmReply;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsExchange;
@@ -187,7 +188,7 @@ class PinnedEndpointTest {
       VlmClient client = OpenAiCompatVlmClient.pinned("http://vlm.invalid:" + port,
           InetAddress.getLoopbackAddress(), Duration.ofMillis(5), SSLContext.getDefault());
       try {
-        assertThat(client.complete("m", "describe", null, 10, Duration.ofSeconds(10)))
+        assertThat(client.complete("m", "describe", null, 10, Duration.ofSeconds(10)).content())
             .isEqualTo("fake description");
       } finally {
         client.close();
@@ -245,7 +246,7 @@ class PinnedEndpointTest {
           "https://vlm.invalid:" + vlm.port() + "/v1", InetAddress.getLoopbackAddress(),
           Duration.ofMillis(5), trusting(serverKeys));
       try {
-        assertThat(client.complete("m", "describe", null, 10, Duration.ofSeconds(10)))
+        assertThat(client.complete("m", "describe", null, 10, Duration.ofSeconds(10)).content())
             .isEqualTo("tls description");
       } finally {
         client.close();
@@ -312,9 +313,9 @@ class PinnedEndpointTest {
     private VlmClient client() {
       return new VlmClient() {
         @Override
-        public String complete(VlmRequest request) {
+        public VlmReply complete(VlmRequest request) {
           calls.incrementAndGet();
-          return "described";
+          return VlmReply.of("described");
         }
 
         @Override

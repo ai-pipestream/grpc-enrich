@@ -128,6 +128,10 @@ class RequestEndpointPolicyTest {
     try (FakeVlmServer operator = new FakeVlmServer();
         InProcessEnrich enrich = InProcessEnrich.start(
             new EndpointPolicy(operator.url() + "/v1", OPERATOR_KEY, false, Set.of()))) {
+      // The chart call must be answered with a table: prose is a skip.
+      operator.responder = body -> body.contains("<chart2csv>")
+          ? "year,sales\n2023,10"
+          : "fake description";
       Document document = Document.newBuilder()
           .setName("mixed")
           .addPictures(InProcessEnrich.picture("#/pictures/0").toBuilder()
@@ -144,9 +148,10 @@ class RequestEndpointPolicyTest {
           .build());
 
       assertThat(result.error()).isNull();
-      assertThat(result.annotations()).hasSize(2);
+      // The chart's output plus a description of each picture (the chart too).
+      assertThat(result.annotations()).hasSize(3);
       // Named by the caller, so the key stays off even on the operator's origin.
-      assertThat(operator.recorded()).hasSize(2).allSatisfy(request -> {
+      assertThat(operator.recorded()).hasSize(3).allSatisfy(request -> {
         assertThat(request.header("Authorization")).isEmpty();
         assertThat(request.headers().toString()).doesNotContain(OPERATOR_KEY);
       });
@@ -253,9 +258,10 @@ class RequestEndpointPolicyTest {
           .build());
 
       assertThat(result.error()).isNull();
-      assertThat(result.annotations()).hasSize(2);
-      assertThat(operator.recorded()).singleElement()
-          .satisfies(request -> assertThat(request.header("Authorization"))
+      // One chart table, and a description of each picture (the chart too).
+      assertThat(result.annotations()).hasSize(3);
+      assertThat(operator.recorded()).hasSize(2)
+          .allSatisfy(request -> assertThat(request.header("Authorization"))
               .containsExactly("Bearer " + OPERATOR_KEY));
       assertThat(chartModel.recorded()).singleElement().satisfies(request -> {
         assertThat(request.header("Authorization")).isEmpty();
