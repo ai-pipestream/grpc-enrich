@@ -7,12 +7,15 @@ import ai.pipestream.document.v1.CodeMetaField;
 import ai.pipestream.document.v1.DescriptionMetaField;
 import ai.pipestream.document.v1.DescriptionAnnotation;
 import ai.pipestream.document.v1.Document;
+import ai.pipestream.document.v1.GenerationSource;
 import ai.pipestream.document.v1.PictureAnnotation;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.PictureTabularChartData;
+import ai.pipestream.document.v1.SourceType;
 import ai.pipestream.enrich.engine.ItemSelector.Kind;
 import ai.pipestream.enrich.engine.ItemSelector.Selection;
 import ai.pipestream.enrich.engine.ItemSelector.WorkItem;
+import ai.pipestream.enrich.v1.ChartOutput;
 import ai.pipestream.enrich.v1.EnrichComplete;
 import ai.pipestream.enrich.v1.EnrichDocumentResponse;
 import ai.pipestream.enrich.v1.EnrichOptions;
@@ -26,6 +29,7 @@ import ai.pipestream.enrich.v1.VlmHeader;
 import ai.pipestream.enrich.vlm.VlmClient;
 import ai.pipestream.enrich.vlm.VlmClient.Header;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmReply;
 import ai.pipestream.enrich.vlm.VlmClient.VlmRequest;
 import ai.pipestream.enrich.vlm.PublicAddress;
 import ai.pipestream.enrich.vlm.VlmEndpoint;
@@ -633,7 +637,7 @@ public final class EnrichmentEngine {
     WorkItem item = call.item();
     try {
       VlmGenerationParams sampling = item.sampling();
-      String content = call.client().complete(new VlmRequest(
+      VlmReply reply = call.client().complete(new VlmRequest(
           item.model(),
           item.prompt(),
           item.image(),
@@ -644,9 +648,25 @@ public final class EnrichmentEngine {
           sampling.hasSeed() ? OptionalLong.of(sampling.getSeed()) : OptionalLong.empty(),
           call.headers(),
           timeout));
+      if (reply.truncated() && !usableWhenCut(item)) {
+        // The reply stopped at the token limit. A cut transcription or a
+        // table missing its last rows looks exactly like a complete one, so
+        // it is never emitted and never replaces the item's text.
+        skipped.incrementAndGet();
+        emit.accept(skippedEvent(item, SkipReason.SKIP_REASON_OUTPUT_TRUNCATED,
+            "the model stopped at its " + item.maxTokens()
+                + "-token output limit before finishing; the partial reply was not used"));
+        return;
+      }
+      String content = reply.content();
+      GenerationSource.Builder generation = GenerationSource.newBuilder()
+          .setModel(item.model())
+          .setStopReason(reply.stopReason());
+      reply.finishReason().ifPresent(generation::setFinishReason);
       ItemAnnotation.Builder annotation = ItemAnnotation.newBuilder()
           .setSelfRef(item.selfRef())
-          .setModel(item.model());
+          .setModel(item.model())
+          .setGeneration(generation);
       switch (item.kind()) {
         case DESCRIPTION -> annotation.getDescriptionBuilder().setText(content);
         case CHART -> chartAnnotation(item, content, annotation);
@@ -672,6 +692,17 @@ public final class EnrichmentEngine {
     } catch (RuntimeException unexpected) {
       unexpected(call, unexpected, emit, failed);
     }
+  }
+
+  /** True for the outputs that are prose: a description or a chart summary
+   * cut at the token limit is still a description of the picture, and its
+   * annotation says it was cut. Every other output is only right whole. */
+  private static boolean usableWhenCut(WorkItem item) {
+    return switch (item.kind()) {
+      case DESCRIPTION -> true;
+      case CHART -> item.chartOutput() == ChartOutput.CHART_OUTPUT_SUMMARY;
+      case CODE, FORMULA -> false;
+    };
   }
 
   /** Counts, logs, and reports a failure no VLM error accounts for. The log
@@ -724,7 +755,9 @@ public final class EnrichmentEngine {
   /** Applies the emitted annotations to a copy of the document. Additive
    * only: provenance boxes and orig text are never rewritten. Each patch
    * lands on the item whose VLM call produced it, keyed by document index —
-   * not by self_ref, which pathological documents can duplicate. */
+   * not by self_ref, which pathological documents can duplicate. The item
+   * also gains the generation as a source, which is where the document says
+   * a description was cut at the token limit. */
   private static Document applyPatches(
       Document document, ConcurrentLinkedQueue<EnrichedItem> enriched) {
     Document.Builder patched = document.toBuilder();
@@ -740,11 +773,12 @@ public final class EnrichmentEngine {
                       .setKind("description")
                       .setText(annotation.getDescription().getText())
                       .setProvenance(annotation.getModel())))
+              .addSource(generatedBy(annotation))
               .build());
         }
         case CHART -> {
           PictureItem picture = patched.getPictures(item.pictureIndex());
-          PictureItem.Builder updated = picture.toBuilder();
+          PictureItem.Builder updated = picture.toBuilder().addSource(generatedBy(annotation));
           switch (annotation.getAnnotationCase()) {
             case CHART_SUMMARY -> {
               updated.addAnnotations(PictureAnnotation.newBuilder()
@@ -780,7 +814,8 @@ public final class EnrichmentEngine {
           BaseTextItem text = patched.getTexts(item.textIndex());
           CodeItem.Builder code = text.getCode().toBuilder()
               .setText(annotation.getCode().getText())
-              .setCodeLanguage(annotation.getCode().getLanguage());
+              .setCodeLanguage(annotation.getCode().getLanguage())
+              .addSource(generatedBy(annotation));
           if (!annotation.getCode().getLanguageRaw().isEmpty()) {
             code.setCodeLanguageRaw(annotation.getCode().getLanguageRaw());
           }
@@ -791,7 +826,8 @@ public final class EnrichmentEngine {
           patched.setTexts(item.textIndex(), text.toBuilder()
               .setFormula(text.getFormula().toBuilder()
                   .setBase(text.getFormula().getBase().toBuilder()
-                      .setText(annotation.getFormula().getText())))
+                      .setText(annotation.getFormula().getText())
+                      .addSource(generatedBy(annotation))))
               .build());
         }
       }
@@ -805,6 +841,12 @@ public final class EnrichmentEngine {
 
   private static EnrichDocumentResponse event(EnrichComplete complete) {
     return EnrichDocumentResponse.newBuilder().setComplete(complete).build();
+  }
+
+  /** The source entry that attributes an applied annotation to the
+   * generation that produced it. */
+  private static SourceType generatedBy(ItemAnnotation annotation) {
+    return SourceType.newBuilder().setGeneration(annotation.getGeneration()).build();
   }
 
   private static EnrichDocumentResponse skippedEvent(

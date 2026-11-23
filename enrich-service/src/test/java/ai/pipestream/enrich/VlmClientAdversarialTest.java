@@ -186,7 +186,7 @@ class VlmClientAdversarialTest {
       vlm.body = chatBody("\"line one\\nline two — héllo 😀\\tend\"");
       OpenAiCompatVlmClient client =
           new OpenAiCompatVlmClient(vlm.url(), Duration.ofMillis(1));
-      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)))
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).content())
           .isEqualTo("line one\nline two — héllo 😀\tend");
     }
   }
@@ -270,7 +270,8 @@ class VlmClientAdversarialTest {
       vlm.body = chatBody("\"ok\"");
       OpenAiCompatVlmClient client =
           new OpenAiCompatVlmClient(vlm.url() + "/", Duration.ofMillis(1));
-      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).content())
+          .isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/v1/chat/completions");
     }
   }
@@ -281,7 +282,8 @@ class VlmClientAdversarialTest {
       vlm.body = chatBody("\"ok\"");
       OpenAiCompatVlmClient client =
           new OpenAiCompatVlmClient(vlm.url() + "/v1/chat/completions", Duration.ofMillis(1));
-      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).content())
+          .isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/v1/chat/completions");
     }
   }
@@ -292,7 +294,8 @@ class VlmClientAdversarialTest {
       vlm.body = chatBody("\"ok\"");
       OpenAiCompatVlmClient client =
           new OpenAiCompatVlmClient(vlm.url() + "/models/llama", Duration.ofMillis(1));
-      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).content())
+          .isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/models/llama/v1/chat/completions");
     }
   }
@@ -304,7 +307,8 @@ class VlmClientAdversarialTest {
       OpenAiCompatVlmClient client = new OpenAiCompatVlmClient(
           vlm.url() + "/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
           Duration.ofMillis(1));
-      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).content())
+          .isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/openai/deployments/gpt-4o/chat/completions");
       assertThat(vlm.queries.get(0)).isEqualTo("api-version=2024-10-21");
     }
@@ -316,7 +320,8 @@ class VlmClientAdversarialTest {
       vlm.body = chatBody("\"ok\"");
       OpenAiCompatVlmClient client =
           new OpenAiCompatVlmClient(vlm.url() + "/v3/chat/completions", Duration.ofMillis(1));
-      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).content())
+          .isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/v3/chat/completions");
     }
   }
@@ -327,7 +332,8 @@ class VlmClientAdversarialTest {
       vlm.body = chatBody("\"ok\"");
       OpenAiCompatVlmClient client =
           new OpenAiCompatVlmClient(vlm.url() + "/v3", Duration.ofMillis(1));
-      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5))).isEqualTo("ok");
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).content())
+          .isEqualTo("ok");
       assertThat(vlm.paths.get(0)).isEqualTo("/v3/chat/completions");
     }
   }
