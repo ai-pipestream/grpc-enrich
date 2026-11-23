@@ -31,7 +31,7 @@ gRPC enrichment service: VLM picture-describe, chart extract, and formula/code a
   orchestration, chart/code/formula post-processing), `vlm/` (the
   OpenAI-compatible HTTP client).
   - `server/GrpcEnrichServer.java`, `server/EnrichServiceImpl.java`: gRPC wiring
-  - `server/EnrichHttpServer.java`: the JSON/NDJSON HTTP shim over the same streaming path
+  - `server/EnrichHttpServer.java`: the JSON/NDJSON HTTP shim over the same streaming path (off unless `ENRICH_HTTP_PORT` is set)
   - `engine/ItemSelector.java`: picks pictures, charts, code, formula items
   - `engine/EnrichmentEngine.java`: concurrent VLM calls, skip-on-failure
   - `engine/ChartCsvParser.java`, `engine/CodeFormulaPostProcessor.java`: output typing
