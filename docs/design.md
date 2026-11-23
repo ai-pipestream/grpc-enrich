@@ -52,8 +52,9 @@ chart-only `model` and `vlm_endpoint`.
 
 Events:
 
-1. `EnrichStarted`: item counts selected
-2. `ItemAnnotation`: `self_ref` plus one of `description` (string, model,
+1. `EnrichStarted`: item counts selected, plus `unmatched_images` (crops
+   whose `self_ref` names no enrichable item)
+2. `ItemAnnotation`: `self_ref`, `input` (image or text-only), plus one of `description` (string, model,
    confidence), `chart_table` (a `TableData`), `chart_summary` (text),
    `chart_code` (Python text), or `code` / `formula` (text + language). A
    chart with several outputs enabled is answered by one event per output.
@@ -106,7 +107,8 @@ The enrich process does not download Hugging Face repos. The operator points
 - Code/formula: `TextItem.label` already `CODE` / `FORMULA`, or the layout
   label from gRParse. We do not re-run layout. The VLM call sends the item's
   image crop with the bare `<code>` / `<formula>` prompt when a crop is
-  available, else a text-only fallback; output is post-processed (sentinel
+  available, else a text-only fallback marked `ANNOTATION_INPUT_TEXT_ONLY`
+  on its annotation; output is post-processed (sentinel
   strip, `<_language_>` token mapped to `code_language`).
 
 ## 6. Tests

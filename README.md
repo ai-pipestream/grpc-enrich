@@ -184,7 +184,14 @@ the summary lands in the picture's `meta.description` and the code in
 Code and formula items are sent as image crops when an `ItemImage` is
 supplied for the item's `self_ref` (code items may also carry an inline
 data-URI `ImageRef`); without a crop, a text-only prompt with the existing
-item text is the fallback. Output is post-processed: truncate at
+item text is the fallback. Every annotation says which it was:
+`ItemAnnotation.input` is `ANNOTATION_INPUT_IMAGE` or
+`ANNOTATION_INPUT_TEXT_ONLY`, so a transcription written from the text layer
+alone never passes for one read off the page. A code item whose `ImageRef` is
+a non-data URI is skipped (`SKIP_REASON_UNFETCHABLE_URI`), not sent as text.
+`EnrichStarted.unmatched_images` counts the `ItemImage` crops whose
+`self_ref` names no picture, code or formula item; non-zero means the crop
+keys and the document disagree. Output is post-processed: truncate at
 `<end_of_utterance>`, strip `</code>` / `</formula>` / the `<loc_0>...`
 sentinel, lstrip, and parse the leading `<_language_>` token into
 `CodeAnnotation.language` (exact-case match against the document schema's

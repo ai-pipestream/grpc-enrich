@@ -285,6 +285,13 @@ message EnrichStarted {
   uint32 code_enrichments = 3;
   // Formula items selected for enrichment.
   uint32 formula_enrichments = 4;
+  // ItemImage crops whose self_ref names no picture, code or formula item of
+  // the document, so their bytes reached nothing. Non-zero means the caller's
+  // crop keys and the document's self_refs disagree; the items those crops
+  // were meant for are enriched without them (ANNOTATION_INPUT_TEXT_ONLY) or
+  // skipped (SKIP_REASON_NO_IMAGE). A crop for an item whose job is switched
+  // off is not counted.
+  uint32 unmatched_images = 5;
 }
 
 // The annotation produced for one item, keyed by the item's self_ref so the
@@ -310,6 +317,25 @@ message ItemAnnotation {
     // Python code that recreates a chart (ChartExtractionOptions.code).
     ChartCode chart_code = 8;
   }
+  // What the model was given to produce the annotation. Set on every
+  // annotation. A code or formula annotation marked
+  // ANNOTATION_INPUT_TEXT_ONLY was written from the item's existing text
+  // alone, without the item's image.
+  AnnotationInput input = 10;
+}
+
+// What a VLM call was given for an item.
+enum AnnotationInput {
+  // Never emitted; the zero value required by proto3.
+  ANNOTATION_INPUT_UNSPECIFIED = 0;
+  // The item's image (an ItemImage crop or an inline data URI) went with the
+  // prompt.
+  ANNOTATION_INPUT_IMAGE = 1;
+  // No image was available for the item, so the prompt carried only the
+  // item's existing text (code and formula items; the documented fallback
+  // when the caller supplies no crop). The result is a rewrite of that text,
+  // not a reading of the page.
+  ANNOTATION_INPUT_TEXT_ONLY = 2;
 }
 
 // A VLM-generated description of a picture.

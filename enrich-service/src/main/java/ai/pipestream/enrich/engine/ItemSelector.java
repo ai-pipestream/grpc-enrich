@@ -19,6 +19,7 @@ import ai.pipestream.enrich.v1.SkipReason;
 import ai.pipestream.enrich.v1.VlmGenerationParams;
 import ai.pipestream.enrich.vlm.VlmClient.VlmImage;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -77,8 +78,10 @@ public final class ItemSelector {
   }
 
   /** The result of walking the document: work to run plus items skipped at
-   * selection time (before any VLM call). */
-  public record Selection(List<WorkItem> work, List<ItemSkipped> skips) {
+   * selection time (before any VLM call). {@code unmatchedImages} counts the
+   * ItemImage crops whose self_ref names no picture, code or formula item,
+   * so their bytes reached nothing. */
+  public record Selection(List<WorkItem> work, List<ItemSkipped> skips, int unmatchedImages) {
     /** Items of {@code kind} selected. Charts count pictures, not calls: a
      * chart with three enabled outputs is one chart extraction. */
     public long count(Kind kind) {
@@ -133,7 +136,8 @@ public final class ItemSelector {
   private static final String CODE_IMAGE_PROMPT = "<code>";
 
   // Text-only fallbacks for code/formula items with no image crop, so
-  // enrichment still works when the caller cannot supply crops.
+  // enrichment still works when the caller cannot supply crops. The
+  // annotation such a call produces is marked ANNOTATION_INPUT_TEXT_ONLY.
   private static final String CODE_TEXT_PROMPT =
       "Transcribe and normalize the following code block. Reply with the code only.\n\n";
   private static final String FORMULA_TEXT_PROMPT =
@@ -146,10 +150,13 @@ public final class ItemSelector {
       Document document, Map<String, ItemImage> crops, EnrichOptions options) {
     List<WorkItem> work = new ArrayList<>();
     List<ItemSkipped> skips = new ArrayList<>();
+    // Every self_ref a crop could belong to, whatever jobs are on.
+    Set<String> enrichable = new HashSet<>();
 
     for (int i = 0; i < document.getPicturesCount(); i++) {
       PictureItem picture = document.getPictures(i);
       String selfRef = selfRef(picture.getSelfRef(), "#/pictures/", i);
+      enrichable.add(selfRef);
       boolean chartJob = options.getDoChartExtraction() && isChart(picture);
       boolean describeJob =
           !chartJob && options.getDoPictureDescription() && passesArea(picture, document, options);
@@ -178,6 +185,11 @@ public final class ItemSelector {
 
     for (int i = 0; i < document.getTextsCount(); i++) {
       var baseText = document.getTexts(i);
+      if (baseText.hasCode()) {
+        enrichable.add(selfRef(baseText.getCode().getSelfRef(), "#/texts/", i));
+      } else if (baseText.hasFormula()) {
+        enrichable.add(selfRef(baseText.getFormula().getBase().getSelfRef(), "#/texts/", i));
+      }
       if (options.getDoCodeEnrichment() && baseText.hasCode()) {
         CodeItem code = baseText.getCode();
         String selfRef = selfRef(code.getSelfRef(), "#/texts/", i);
@@ -186,6 +198,10 @@ public final class ItemSelector {
         if (image != null) {
           work.add(new WorkItem(selfRef, Kind.CODE, codeFormulaModel(options), CODE_IMAGE_PROMPT,
               image, code.getText(), MAX_TOKENS_CODE_FORMULA, -1, i));
+        } else if (code.hasImage() && !code.getImage().getUri().isEmpty()) {
+          // The item names an image this server will not fetch. Falling back
+          // to the text would answer as if that image had been read.
+          skips.add(unfetchableSkip(selfRef, code.getImage()));
         } else {
           work.add(new WorkItem(selfRef, Kind.CODE, codeFormulaModel(options),
               CODE_TEXT_PROMPT + code.getText(), null, code.getText(), MAX_TOKENS_CODE_FORMULA,
@@ -209,7 +225,13 @@ public final class ItemSelector {
       }
     }
 
-    return new Selection(work, skips);
+    int unmatchedImages = 0;
+    for (String cropRef : crops.keySet()) {
+      if (!enrichable.contains(cropRef)) {
+        unmatchedImages++;
+      }
+    }
+    return new Selection(work, skips, unmatchedImages);
   }
 
   /** A picture-description call: the preset's model, prompt, and budget,
@@ -364,12 +386,15 @@ public final class ItemSelector {
 
   private static ItemSkipped imageSkip(PictureItem picture, String selfRef) {
     if (picture.hasImage() && !picture.getImage().getUri().isEmpty()) {
-      return skip(selfRef, SkipReason.SKIP_REASON_UNFETCHABLE_URI,
-          "image is a non-data URI and outbound fetching is disabled: "
-              + picture.getImage().getUri());
+      return unfetchableSkip(selfRef, picture.getImage());
     }
     return skip(selfRef, SkipReason.SKIP_REASON_NO_IMAGE,
         "picture has no image bytes and no ItemImage crop was supplied");
+  }
+
+  private static ItemSkipped unfetchableSkip(String selfRef, ImageRef image) {
+    return skip(selfRef, SkipReason.SKIP_REASON_UNFETCHABLE_URI,
+        "image is a non-data URI and outbound fetching is disabled: " + image.getUri());
   }
 
   private static ItemSkipped skip(String selfRef, SkipReason reason, String detail) {
