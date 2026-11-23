@@ -376,21 +376,29 @@ public final class EnrichmentEngine {
    * produced. {@code emit} must be thread-safe: item events arrive from
    * worker threads. Returns after the EnrichComplete trailer has been
    * emitted.
+   *
+   * @return true when the EnrichComplete trailer was emitted
    */
-  public void enrich(
+  public boolean enrich(
       Document document,
       Map<String, ItemImage> crops,
       EnrichOptions options,
       Consumer<EnrichDocumentResponse> emit) {
-    enrich(document, crops, options, emit, new Cancellation());
+    return enrich(document, crops, options, emit, new Cancellation());
   }
 
   /**
    * {@link #enrich(Document, Map, EnrichOptions, Consumer)} that stops when
    * {@code cancellation} is cancelled: in-flight VLM calls are interrupted,
-   * queued ones never start, and it returns without a trailer.
+   * queued ones never start, and it returns without a trailer. The calling
+   * thread being interrupted (a server shutting down) cancels it the same
+   * way.
+   *
+   * @return true when the EnrichComplete trailer was emitted; false when the
+   *     enrichment was cancelled or interrupted first, so the stream it fed
+   *     is incomplete
    */
-  public void enrich(
+  public boolean enrich(
       Document document,
       Map<String, ItemImage> crops,
       EnrichOptions options,
@@ -434,7 +442,7 @@ public final class EnrichmentEngine {
       clients.values().forEach(VlmClient::close);
     }
     if (cancellation.isCancelled()) {
-      return;
+      return false;
     }
 
     EnrichComplete.Builder complete = EnrichComplete.newBuilder()
@@ -445,6 +453,7 @@ public final class EnrichmentEngine {
       complete.setDocument(applyPatches(document, enriched));
     }
     emit.accept(event(complete.build()));
+    return true;
   }
 
   /** The request's concurrency, within the server's cap. The field is uint32
