@@ -102,4 +102,18 @@ class EnrichConfigTest {
     assertThat(GrpcEnrichServer.startupLine(config))
         .contains("with API key").contains("per-request endpoints: refused");
   }
+
+  @Test
+  void httpFrontEnd_isOffUnlessAPortIsSet() {
+    // The JSON shim is a second front door for the Document plane; gRPC is
+    // the API, so the shim opens only when an operator asks for it.
+    assertThat(EnrichConfig.from(Map.of()).httpPort())
+        .as("ENRICH_HTTP_PORT unset").isNull();
+    assertThat(EnrichConfig.from(Map.of("ENRICH_HTTP_PORT", "")).httpPort()).isNull();
+    assertThat(EnrichConfig.from(Map.of("ENRICH_HTTP_PORT", "0")).httpPort()).isNull();
+    assertThat(EnrichConfig.from(Map.of("ENRICH_HTTP_PORT", "50068")).httpPort())
+        .isEqualTo(50068);
+    assertThatThrownBy(() -> EnrichConfig.from(Map.of("ENRICH_HTTP_PORT", "http")))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
 }

@@ -21,6 +21,7 @@ import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import io.grpc.Status;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.util.JsonFormat;
 import io.grpc.ManagedChannel;
@@ -207,6 +208,32 @@ class EnrichHttpServerTest {
       assertThat(response.statusCode()).isEqualTo(400);
       assertThat(response.body()).as("%s", response.body()).contains("\"error\"");
     }
+  }
+
+  @Test
+  void errorBody_namesTheGrpcStatusCode() throws Exception {
+    // An RPC failure keeps its status code on the way out: an HTTP caller
+    // must not have to guess it from the HTTP status or the message.
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      Fixture fixture = startHttp(vlm.url());
+      HttpResponse<String> response = post(fixture.base() + "/v1/enrich",
+          "{\"options\":{\"doPictureDescription\":true}}");
+      assertThat(response.statusCode()).isEqualTo(400);
+      JsonObject body = JsonParser.parseString(response.body()).getAsJsonObject();
+      assertThat(body.get("code").getAsString()).isEqualTo("INVALID_ARGUMENT");
+      assertThat(body.get("error").getAsString()).isNotEmpty();
+    }
+  }
+
+  @Test
+  void midStreamErrorLine_namesTheGrpcStatusCode() throws Exception {
+    // The NDJSON stream has already answered 200 by then, so this line is
+    // the only place the failure's status can travel.
+    String line = EnrichHttpServer.errorJson(
+        Status.UNAVAILABLE.withDescription("enrichment was interrupted"));
+    JsonObject parsed = JsonParser.parseString(line).getAsJsonObject();
+    assertThat(parsed.get("code").getAsString()).isEqualTo("UNAVAILABLE");
+    assertThat(parsed.get("error").getAsString()).isEqualTo("enrichment was interrupted");
   }
 
   @Test

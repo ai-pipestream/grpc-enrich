@@ -29,7 +29,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * document arrives as DocumentChunk messages, enrichment starts on the chunk
  * marked complete (crops must precede it). RPC-level failures are
  * INVALID_ARGUMENT / RESOURCE_EXHAUSTED / PERMISSION_DENIED; a failed VLM
- * call is an ItemSkipped event, never an RPC error.
+ * call is an ItemSkipped event, never an RPC error. A failure that escapes
+ * the enrichment itself is INTERNAL, and an enrichment interrupted before its
+ * trailer (a server shutting down) is UNAVAILABLE: the RPC never stays open
+ * without a status, and never ends OK without EnrichComplete.
  *
  * <p><b>Memory bound.</b> The byte cap covers everything one call holds: the
  * document, inline or assembled from chunks, plus its ItemImage crops, and
@@ -57,7 +60,10 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
       .setDescription("Document in, stream of typed ItemAnnotation enrichment events out")
       .build();
 
-  final AtomicLong enriched = new AtomicLong();
+  private static final System.Logger LOG = System.getLogger(EnrichServiceImpl.class.getName());
+
+  /** RPCs refused for size (RESOURCE_EXHAUSTED). What happened to accepted
+   * documents and their items is counted by the engine's EnrichMetrics. */
   final AtomicLong rejected = new AtomicLong();
 
   private final long maxDocumentBytes;
@@ -236,10 +242,29 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
 
       private void start(Document document) {
         started = true;
-        enriched.incrementAndGet();
         Map<String, ItemImage> cropsSnapshot = Map.copyOf(crops);
         executor.execute(() -> {
-          engine.enrich(document, cropsSnapshot, options, this::emit, cancellation);
+          final boolean finished;
+          try {
+            finished = engine.enrich(document, cropsSnapshot, options, this::emit, cancellation);
+          } catch (Throwable escaped) {
+            // Nothing below this frame reports it: without a status here the
+            // thread dies and the client waits out its own deadline. The
+            // status names only the type; the message may carry bytes from a
+            // caller-chosen endpoint, so it stays in the log.
+            LOG.log(System.Logger.Level.ERROR, "enrichment failed outside any item", escaped);
+            fail(Status.INTERNAL, "enrichment failed: " + escaped.getClass().getSimpleName());
+            return;
+          }
+          if (!finished) {
+            // Stopped before the trailer. When the client cancelled, the call
+            // is already terminated and this sends nothing; otherwise this
+            // thread was interrupted (the server is shutting down), and the
+            // stream must not look complete.
+            fail(Status.UNAVAILABLE, "enrichment was interrupted before it finished;"
+                + " the stream carries no EnrichComplete trailer");
+            return;
+          }
           synchronized (sendLock) {
             if (!terminated) {
               terminated = true;

@@ -52,8 +52,9 @@ chart-only `model` and `vlm_endpoint`.
 
 Events:
 
-1. `EnrichStarted`: item counts selected
-2. `ItemAnnotation`: `self_ref` plus one of `description` (string, model,
+1. `EnrichStarted`: item counts selected, plus `unmatched_images` (crops
+   whose `self_ref` names no enrichable item)
+2. `ItemAnnotation`: `self_ref`, `input` (image or text-only), plus one of `description` (string, model,
    confidence), `chart_table` (a `TableData`), `chart_summary` (text),
    `chart_code` (Python text), or `code` / `formula` (text + language). A
    chart with several outputs enabled is answered by one event per output.
@@ -68,8 +69,10 @@ are the real API.
 
 ### HTTP shim
 
-The binary also exposes the service over HTTP on `ENRICH_HTTP_PORT` (default
-50068, `0`/empty disables it; gRPC stays on 50056). It is a shim, not a fork:
+The binary can also expose the service over HTTP on `ENRICH_HTTP_PORT` (off
+unless set; 50068 is the port reserved for it; gRPC stays on 50056). It is
+opt-in because it takes the typed Document as JSON, a second and untyped
+front door for the Document plane. It is a shim, not a fork:
 `EnrichHttpServer` parses the proto3-JSON envelope (`{"options": ...,
 "document": ..., "item_images": ...}`) with protobuf's `JsonFormat` and
 drives the existing `EnrichServiceImpl` through an in-process
@@ -107,7 +110,8 @@ The enrich process does not download Hugging Face repos. The operator points
 - Code/formula: `TextItem.label` already `CODE` / `FORMULA`, or the layout
   label from gRParse. We do not re-run layout. The VLM call sends the item's
   image crop with the bare `<code>` / `<formula>` prompt when a crop is
-  available, else a text-only fallback; output is post-processed (sentinel
+  available, else a text-only fallback marked `ANNOTATION_INPUT_TEXT_ONLY`
+  on its annotation; output is post-processed (sentinel
   strip, `<_language_>` token mapped to `code_language`).
 
 ## 6. Tests

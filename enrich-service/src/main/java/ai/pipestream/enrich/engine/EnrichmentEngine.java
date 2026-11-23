@@ -15,6 +15,7 @@ import ai.pipestream.document.v1.SourceType;
 import ai.pipestream.enrich.engine.ItemSelector.Kind;
 import ai.pipestream.enrich.engine.ItemSelector.Selection;
 import ai.pipestream.enrich.engine.ItemSelector.WorkItem;
+import ai.pipestream.enrich.v1.AnnotationInput;
 import ai.pipestream.enrich.v1.ChartOutput;
 import ai.pipestream.enrich.v1.EnrichComplete;
 import ai.pipestream.enrich.v1.EnrichDocumentResponse;
@@ -108,6 +109,7 @@ public final class EnrichmentEngine {
   private final Semaphore processSlots;
   /** Resolves a caller endpoint's host for the public-address check. */
   private final PublicAddress.Resolver resolver;
+  private final EnrichMetrics metrics = new EnrichMetrics();
 
   /** An engine whose only endpoint is {@code defaultEndpoint}: no key, and
    * per-request endpoints refused. */
@@ -380,26 +382,39 @@ public final class EnrichmentEngine {
    * produced. {@code emit} must be thread-safe: item events arrive from
    * worker threads. Returns after the EnrichComplete trailer has been
    * emitted.
+   *
+   * @return true when the EnrichComplete trailer was emitted
    */
-  public void enrich(
+  public boolean enrich(
       Document document,
       Map<String, ItemImage> crops,
       EnrichOptions options,
       Consumer<EnrichDocumentResponse> emit) {
-    enrich(document, crops, options, emit, new Cancellation());
+    return enrich(document, crops, options, emit, new Cancellation());
   }
 
   /**
    * {@link #enrich(Document, Map, EnrichOptions, Consumer)} that stops when
    * {@code cancellation} is cancelled: in-flight VLM calls are interrupted,
-   * queued ones never start, and it returns without a trailer.
+   * queued ones never start, and it returns without a trailer. The calling
+   * thread being interrupted (a server shutting down) cancels it the same
+   * way.
+   *
+   * @return true when the EnrichComplete trailer was emitted; false when the
+   *     enrichment was cancelled or interrupted first, so the stream it fed
+   *     is incomplete
    */
-  public void enrich(
+  public boolean enrich(
       Document document,
       Map<String, ItemImage> crops,
       EnrichOptions options,
-      Consumer<EnrichDocumentResponse> emit,
+      Consumer<EnrichDocumentResponse> caller,
       Cancellation cancellation) {
+    // Every event is counted on its way out, so the metrics are the events.
+    Consumer<EnrichDocumentResponse> emit = event -> {
+      observe(event);
+      caller.accept(event);
+    };
     Selection selection = ItemSelector.select(document, crops,
         FormulaPrompts.resolve(options, endpoints.servedModel()));
     emit.accept(event(EnrichStarted.newBuilder()
@@ -407,6 +422,7 @@ public final class EnrichmentEngine {
         .setChartExtractions((int) selection.count(Kind.CHART))
         .setCodeEnrichments((int) selection.count(Kind.CODE))
         .setFormulaEnrichments((int) selection.count(Kind.FORMULA))
+        .setUnmatchedImages(selection.unmatchedImages())
         .build()));
 
     AtomicInteger succeeded = new AtomicInteger();
@@ -438,7 +454,7 @@ public final class EnrichmentEngine {
       clients.values().forEach(VlmClient::close);
     }
     if (cancellation.isCancelled()) {
-      return;
+      return false;
     }
 
     EnrichComplete.Builder complete = EnrichComplete.newBuilder()
@@ -449,6 +465,26 @@ public final class EnrichmentEngine {
       complete.setDocument(applyPatches(document, enriched));
     }
     emit.accept(event(complete.build()));
+    return true;
+  }
+
+  /** The process-wide counts of what this engine's enrichments did. */
+  public EnrichMetrics metrics() {
+    return metrics;
+  }
+
+  /** Counts {@code event}, and logs a VLM failure the first time its message
+   * is seen: the caller gets every skip, the server log one line per kind of
+   * failure. The detail is already the safe message for a caller endpoint. */
+  private void observe(EnrichDocumentResponse event) {
+    metrics.record(event);
+    if (event.hasSkipped()
+        && event.getSkipped().getReason() == SkipReason.SKIP_REASON_VLM_ERROR
+        && metrics.firstSighting(event.getSkipped().getDetail())) {
+      LOG.log(System.Logger.Level.WARNING, "VLM call failed for "
+          + event.getSkipped().getSelfRef() + ": " + event.getSkipped().getDetail()
+          + " (logged once per distinct failure; counts are on the metrics line)");
+    }
   }
 
   /** The request's concurrency, within the server's cap. The field is uint32
@@ -681,6 +717,12 @@ public final class EnrichmentEngine {
         case FORMULA -> annotation.getFormulaBuilder()
             .setText(FormulaReply.text(item.prompt(), content));
       }
+      // What the model was given: a text-only call rewrites the item's text
+      // without seeing the page, and its annotation must not pass for a
+      // reading of the image.
+      annotation.setInput(item.image() == null
+          ? AnnotationInput.ANNOTATION_INPUT_TEXT_ONLY
+          : AnnotationInput.ANNOTATION_INPUT_IMAGE);
       ItemAnnotation built = annotation.build();
       succeeded.incrementAndGet();
       enriched.add(new EnrichedItem(item, built));
@@ -713,7 +755,7 @@ public final class EnrichmentEngine {
     failed.incrementAndGet();
     LOG.log(System.Logger.Level.ERROR,
         "unexpected failure enriching " + call.item().selfRef(), failure);
-    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_UNSPECIFIED,
+    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_INTERNAL_ERROR,
         "unexpected failure enriching this item: " + (call.callerChosen()
             ? failure.getClass().getSimpleName()
             : failure.toString())));

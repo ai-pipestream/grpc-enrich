@@ -272,7 +272,9 @@ class EnrichStreamAdversarialTest {
       assertThat(result.events().get(0).getStarted().getPictureDescriptions()).isEqualTo(3);
       assertThat(result.annotations()).hasSize(2);
       assertThat(result.skips()).singleElement().satisfies(skip -> {
-        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_UNSPECIFIED);
+        // Never the zero value: a client that switches on reason must be able
+        // to tell a server fault from a skip.
+        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_INTERNAL_ERROR);
         assertThat(skip.getDetail()).contains("OutOfMemoryError");
       });
       assertThat(result.complete().getSucceeded()).isEqualTo(2);

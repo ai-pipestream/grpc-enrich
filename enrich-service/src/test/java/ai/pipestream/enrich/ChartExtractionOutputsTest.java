@@ -330,10 +330,12 @@ class ChartExtractionOutputsTest {
 
       assertThat(result.error()).isNull();
       assertThat(chartModel.requests).hasSize(2);
-      assertThat(general.requests).singleElement()
-          .satisfies(request -> assertThat(request.prompt())
+      // Both pictures are described, the chart too: description and chart
+      // extraction are independent jobs, and only the chart calls are routed.
+      assertThat(general.requests).hasSize(2)
+          .allSatisfy(request -> assertThat(request.prompt())
               .isEqualTo("Describe this image in a few sentences."));
-      assertThat(result.annotations()).hasSize(3);
+      assertThat(result.annotations()).hasSize(4);
     }
   }
 
