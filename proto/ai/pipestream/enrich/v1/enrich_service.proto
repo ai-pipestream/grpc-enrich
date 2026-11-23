@@ -471,8 +471,9 @@ enum SkipReason {
   SKIP_REASON_UNFETCHABLE_URI = 2;
   // The picture's area is below EnrichOptions.picture_description_area_threshold.
   SKIP_REASON_BELOW_AREA_THRESHOLD = 3;
-  // The VLM call failed: endpoint unreachable, non-200 response, timeout, or
-  // an unparseable reply.
+  // The VLM call failed: endpoint unreachable, non-200 response, timeout, an
+  // unparseable reply, or a reply with no text in it (an annotation is never
+  // emitted with empty text, and item text is never replaced by nothing).
   SKIP_REASON_VLM_ERROR = 4;
   // The server's endpoint policy refuses the endpoint the request named for
   // this item: per-request endpoints are not allowed, or, with

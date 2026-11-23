@@ -704,18 +704,18 @@ public final class EnrichmentEngine {
           .setModel(item.model())
           .setGeneration(generation);
       switch (item.kind()) {
-        case DESCRIPTION -> annotation.getDescriptionBuilder().setText(content);
+        case DESCRIPTION -> annotation.getDescriptionBuilder().setText(someText(content));
         case CHART -> chartAnnotation(item, content, annotation);
         case CODE -> {
           CodeFormulaPostProcessor.CodeResult code =
               CodeFormulaPostProcessor.processCode(content);
           annotation.getCodeBuilder()
-              .setText(code.text())
+              .setText(someText(code.text()))
               .setLanguage(code.language())
               .setLanguageRaw(code.languageRaw());
         }
         case FORMULA -> annotation.getFormulaBuilder()
-            .setText(FormulaReply.text(item.prompt(), content));
+            .setText(someText(FormulaReply.text(item.prompt(), content)));
       }
       // What the model was given: a text-only call rewrites the item's text
       // without seeing the page, and its annotation must not pass for a
@@ -734,6 +734,23 @@ public final class EnrichmentEngine {
     } catch (RuntimeException unexpected) {
       unexpected(call, unexpected, emit, failed);
     }
+  }
+
+  /**
+   * {@code text}, the text an annotation is about to carry, once it is known
+   * to be something. A reply with no text in it (empty content from a
+   * reasoning model that spent its budget thinking, an immediate end of
+   * sequence, a reply that was only the sentinels post-processing strips) is
+   * not an enrichment: emitted, it would count as succeeded and, with
+   * return_document, replace the item's own text with nothing.
+   *
+   * @throws VlmException when {@code text} is blank, so the item is skipped
+   */
+  private static String someText(String text) throws VlmException {
+    if (text.isBlank()) {
+      throw new VlmException("model returned no text");
+    }
+    return text;
   }
 
   /** True for the outputs that are prose: a description or a chart summary
