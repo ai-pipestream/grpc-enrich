@@ -307,6 +307,13 @@ message ItemAnnotation {
     // Python code that recreates a chart (ChartExtractionOptions.code).
     ChartCode chart_code = 8;
   }
+  // The generation that produced the annotation: the model, the endpoint's
+  // finish_reason verbatim, and that reason classified as stop_reason. Set on
+  // every annotation. A picture description or chart summary whose
+  // stop_reason is VLM_STOP_REASON_LENGTH ends where the token limit cut it;
+  // the other annotation kinds are never emitted from a length-stopped reply
+  // (SKIP_REASON_OUTPUT_TRUNCATED). The endpoint is never named here.
+  ai.pipestream.document.v1.GenerationSource generation = 9;
 }
 
 // A VLM-generated description of a picture.
@@ -404,8 +411,8 @@ enum ChartOutput {
 message EnrichComplete {
   // Annotations emitted (one per chart output for a multi-output chart).
   uint32 succeeded = 1;
-  // Skips emitted (no image, below threshold, or VLM error; one per chart
-  // output that failed).
+  // Skips emitted (no image, below threshold, VLM error, or a reply cut at
+  // the token limit; one per chart output that failed).
   uint32 skipped = 2;
   // Items that failed unexpectedly outside the VLM call. Normally zero; a
   // per-item failure that is not a clean skip lands here rather than failing
@@ -443,6 +450,12 @@ enum SkipReason {
   // link-local, or other non-public address. An operator allows such an
   // endpoint by listing its origin in ENRICH_VLM_ENDPOINT_ALLOWLIST.
   SKIP_REASON_ENDPOINT_REFUSED = 5;
+  // The model stopped at its output token limit (finish_reason "length")
+  // before finishing a reply that is only usable whole: a code or formula
+  // transcription, a chart table, chart code. The partial reply is not
+  // emitted and never replaces item text; raise VlmGenerationParams.max_tokens
+  // to give the model room.
+  SKIP_REASON_OUTPUT_TRUNCATED = 6;
 }
 
 // Picture-description model families served by the remote endpoint. UNSPECIFIED plus picture_description_preset_raw addresses

@@ -19,6 +19,7 @@ import ai.pipestream.enrich.v1.ItemSkipped;
 import ai.pipestream.enrich.v1.SkipReason;
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
 import ai.pipestream.enrich.vlm.VlmClient;
+import ai.pipestream.enrich.vlm.VlmClient.VlmReply;
 import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -255,7 +256,7 @@ class EnrichStreamAdversarialTest {
       if (calls.incrementAndGet() == 2) {
         throw new OutOfMemoryError("simulated: encoding a crop");
       }
-      return "a picture";
+      return VlmReply.of("a picture");
     };
     try (InProcessEnrich enrich = InProcessEnrich.start(clients,
         EndpointPolicy.defaultOnly("http://vlm.invalid"), 1, 16, Duration.ofSeconds(10),

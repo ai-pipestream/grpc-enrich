@@ -57,8 +57,9 @@ Events:
    confidence), `chart_table` (a `TableData`), `chart_summary` (text),
    `chart_code` (Python text), or `code` / `formula` (text + language). A
    chart with several outputs enabled is answered by one event per output.
-3. `ItemSkipped`: ref + reason (no image, below threshold, VLM error), plus
-   `chart_output` naming the chart output a skip is about
+3. `ItemSkipped`: ref + reason (no image, below threshold, VLM error, reply
+   cut at the token limit), plus `chart_output` naming the chart output a
+   skip is about
 4. `EnrichComplete`: succeeded / skipped / failed counts
 
 The client (gRParse or a sidecar) applies patches. This server may also

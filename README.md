@@ -79,6 +79,14 @@ v1alpha).
   `ItemSkipped` per item as that VLM call returns, `EnrichComplete` trailer.
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
   VLM call is an `ItemSkipped` (`SKIP_REASON_VLM_ERROR`), never an RPC error.
+  Every `ItemAnnotation` carries its `generation` (the model, the endpoint's
+  `finish_reason` verbatim, and that reason classified as `stop_reason`). A
+  reply the model stopped at its token limit is never passed off as whole: a
+  code or formula transcription, a chart table or chart code cut that way is
+  an `ItemSkipped` (`SKIP_REASON_OUTPUT_TRUNCATED`) and replaces nothing; a
+  picture description or chart summary is kept, with
+  `generation.stop_reason = VLM_STOP_REASON_LENGTH`. With `return_document`,
+  each patched item also gains that generation in its `source` list.
 - `GetServiceInfo`: versions, the default endpoint's origin, byte cap,
   process-wide concurrency cap, and the `UiInfo` frontend advertisement (tab
   title/path/tooltip) shared with the other ai-pipestream services.

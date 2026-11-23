@@ -1,9 +1,11 @@
 package ai.pipestream.enrich.vlm;
 
+import ai.pipestream.document.v1.VlmStopReason;
 import com.google.protobuf.ByteString;
 import java.net.InetAddress;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 
@@ -18,11 +20,11 @@ public interface VlmClient {
    *
    * @param request what to send: model, prompt, image, generation
    *     parameters, extra headers, and the per-call timeout
-   * @return the model's text response
+   * @return the model's text response and why the model stopped writing it
    * @throws VlmException when the endpoint is unreachable, answers non-200,
    *     times out, or returns an unparseable or oversized body
    */
-  String complete(VlmRequest request) throws VlmException;
+  VlmReply complete(VlmRequest request) throws VlmException;
 
   /** Releases what this client holds for itself (a connection pool of its
    * own); a no-op for one that shares the process's. */
@@ -40,7 +42,7 @@ public interface VlmClient {
    * @param maxTokens generation cap
    * @param timeout per-call timeout
    */
-  default String complete(
+  default VlmReply complete(
       String model, String prompt, String imageDataUri, int maxTokens, Duration timeout)
       throws VlmException {
     return complete(new VlmRequest(model, prompt,
@@ -74,6 +76,49 @@ public interface VlmClient {
       OptionalLong seed,
       List<Header> headers,
       Duration timeout) {}
+
+  /**
+   * One completion: the text, and why the model stopped writing it. A reply
+   * that stopped at the token limit is cut short, and only its stop reason
+   * says so; the text alone looks like any other.
+   *
+   * @param content the model's text response
+   * @param finishReason the endpoint's {@code finish_reason}, verbatim; empty
+   *     when the endpoint reported none
+   */
+  record VlmReply(String content, Optional<String> finishReason) {
+
+    /** The longest {@code finish_reason} kept. The known values are a word
+     * or two; anything longer is not a reason and is not carried. */
+    public static final int MAX_FINISH_REASON_CHARS = 64;
+
+    /** A reply from an endpoint that reported no finish reason. */
+    public static VlmReply of(String content) {
+      return new VlmReply(content, Optional.empty());
+    }
+
+    /**
+     * {@link #finishReason} classified the way docling classifies a VLM
+     * response: OpenAI's {@code length} is the token limit, {@code stop} the
+     * model's own end of text. UNSPECIFIED when none was reported or the
+     * value has no class; {@link #finishReason} still carries it then.
+     */
+    public VlmStopReason stopReason() {
+      return switch (finishReason.orElse("")) {
+        case "length" -> VlmStopReason.VLM_STOP_REASON_LENGTH;
+        case "stop", "end_of_sequence" -> VlmStopReason.VLM_STOP_REASON_END_OF_SEQUENCE;
+        case "stop_sequence" -> VlmStopReason.VLM_STOP_REASON_STOP_SEQUENCE;
+        case "content_filter" -> VlmStopReason.VLM_STOP_REASON_CONTENT_FILTERED;
+        default -> VlmStopReason.VLM_STOP_REASON_UNSPECIFIED;
+      };
+    }
+
+    /** True when the reply stopped at the token limit, so its text is cut
+     * short. */
+    public boolean truncated() {
+      return stopReason() == VlmStopReason.VLM_STOP_REASON_LENGTH;
+    }
+  }
 
   /**
    * The picture for a vision call. An ItemImage crop stays raw bytes until

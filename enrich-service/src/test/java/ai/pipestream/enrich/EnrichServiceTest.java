@@ -18,8 +18,10 @@ import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.ProvenanceItem;
 import ai.pipestream.document.v1.Size;
 import ai.pipestream.document.v1.TextItemBase;
+import ai.pipestream.document.v1.VlmStopReason;
 import ai.pipestream.enrich.engine.EnrichmentEngine;
 import ai.pipestream.enrich.server.EnrichServiceImpl;
+import ai.pipestream.enrich.v1.ChartOutput;
 import ai.pipestream.enrich.v1.ChartPreset;
 import ai.pipestream.enrich.v1.DocumentChunk;
 import ai.pipestream.enrich.v1.EnrichDocumentRequest;
@@ -369,6 +371,39 @@ class EnrichServiceTest {
   }
 
   @Test
+  void chartTableCutAtTheTokenLimit_isSkippedNotAShortTable() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      // The cut landed on a row boundary, so the CSV parses cleanly and is
+      // simply missing the rest of its rows.
+      vlm.responder = body -> "year,sales,profit\n2023,10,3";
+      vlm.finishReason = body -> "length";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      PictureItem chart = pictureWithImage("#/pictures/0").toBuilder()
+          .setLabel(DocItemLabel.DOC_ITEM_LABEL_CHART)
+          .build();
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoChartExtraction(true)
+          .setChartPreset(ChartPreset.CHART_PRESET_GRANITE_VISION_CHART2CSV)
+          .setReturnDocument(true)
+          .setDocument(Document.newBuilder().setName("test").addPictures(chart).build())
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertThat(result.error()).isNull();
+      assertThat(annotations(result)).isEmpty();
+      assertThat(skips(result)).singleElement().satisfies(skip -> {
+        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_OUTPUT_TRUNCATED);
+        assertThat(skip.getChartOutput()).isEqualTo(ChartOutput.CHART_OUTPUT_CSV);
+        assertThat(skip.getDetail()).contains("4096");
+      });
+      var complete = result.events().get(result.events().size() - 1).getComplete();
+      assertThat(complete.getSucceeded()).isZero();
+      assertThat(complete.getSkipped()).isEqualTo(1);
+      assertThat(complete.getDocument().getPictures(0).getAnnotationsCount()).isZero();
+    }
+  }
+
+  @Test
   void vlmEndpointDown_itemSkippedRpcOk() throws Exception {
     int closedPort;
     try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
@@ -479,6 +514,123 @@ class EnrichServiceTest {
           .anyMatch(r -> r.prompt().contains("print( 'hi' )"))).isTrue();
       assertThat(vlm.requests.stream()
           .anyMatch(r -> r.prompt().contains("x2+y2=z2"))).isTrue();
+    }
+  }
+
+  private static Document documentOneCodeOneFormula() {
+    return Document.newBuilder()
+        .setName("test")
+        .addTexts(ai.pipestream.document.v1.BaseTextItem.newBuilder()
+            .setCode(CodeItem.newBuilder()
+                .setSelfRef("#/texts/0")
+                .setLabel(DocItemLabel.DOC_ITEM_LABEL_CODE)
+                .setText("print( 'hi' )")))
+        .addTexts(ai.pipestream.document.v1.BaseTextItem.newBuilder()
+            .setFormula(FormulaItem.newBuilder()
+                .setBase(TextItemBase.newBuilder()
+                    .setSelfRef("#/texts/1")
+                    .setLabel(DocItemLabel.DOC_ITEM_LABEL_FORMULA)
+                    .setText("x2+y2=z2"))))
+        .build();
+  }
+
+  @Test
+  void codeAndFormulaCutAtTheTokenLimit_areSkippedAndNeverApplied() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      // A formula model stuck in a loop fills its whole budget; a long
+      // listing stops mid-line. Both replies look like text.
+      vlm.responder = body -> body.contains("normalize")
+          ? "print('hi')\nprint('and then it sto"
+          : "x^2 + x^2 + x^2 + x^2 + x^2 +";
+      vlm.finishReason = body -> "length";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoCodeEnrichment(true)
+          .setDoFormulaEnrichment(true)
+          .setReturnDocument(true)
+          .setDocument(documentOneCodeOneFormula())
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertThat(result.error()).isNull();
+      assertThat(annotations(result)).isEmpty();
+      assertThat(skips(result)).hasSize(2).allSatisfy(skip -> {
+        assertThat(skip.getReason()).isEqualTo(SkipReason.SKIP_REASON_OUTPUT_TRUNCATED);
+        assertThat(skip.getDetail()).contains("2048");
+      });
+      assertThat(skips(result)).extracting(ItemSkipped::getSelfRef)
+          .containsExactlyInAnyOrder("#/texts/0", "#/texts/1");
+      var complete = result.events().get(result.events().size() - 1).getComplete();
+      assertThat(complete.getSucceeded()).isZero();
+      assertThat(complete.getSkipped()).isEqualTo(2);
+      assertThat(complete.getFailed()).isZero();
+      // The partial text replaced nothing.
+      assertThat(complete.getDocument().getTexts(0).getCode().getText())
+          .isEqualTo("print( 'hi' )");
+      assertThat(complete.getDocument().getTexts(1).getFormula().getBase().getText())
+          .isEqualTo("x2+y2=z2");
+    }
+  }
+
+  @Test
+  void descriptionCutAtTheTokenLimit_isKeptAndSaysSo() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "A bar chart of quarterly revenue in which the";
+      vlm.finishReason = body -> "length";
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoPictureDescription(true)
+          .setReturnDocument(true)
+          .setDocument(documentOnePictureOneParagraph())
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertThat(result.error()).isNull();
+      assertThat(skips(result)).isEmpty();
+      ItemAnnotation annotation = annotations(result).get(0);
+      assertThat(annotation.getDescription().getText())
+          .isEqualTo("A bar chart of quarterly revenue in which the");
+      assertThat(annotation.getGeneration().getStopReason())
+          .isEqualTo(VlmStopReason.VLM_STOP_REASON_LENGTH);
+      assertThat(annotation.getGeneration().getFinishReason()).isEqualTo("length");
+      var complete = result.events().get(result.events().size() - 1).getComplete();
+      assertThat(complete.getSucceeded()).isEqualTo(1);
+      // The returned document says it too, on the picture the text landed on.
+      var picture = complete.getDocument().getPictures(0);
+      assertThat(picture.getAnnotations(0).getDescription().getText())
+          .isEqualTo("A bar chart of quarterly revenue in which the");
+      assertThat(picture.getSourceList()).singleElement().satisfies(source ->
+          assertThat(source.getGeneration().getStopReason())
+              .isEqualTo(VlmStopReason.VLM_STOP_REASON_LENGTH));
+    }
+  }
+
+  @Test
+  void everyAnnotationNamesItsGeneration() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> body.contains("normalize") ? "print('hi')" : "x^2 + y^2 = z^2";
+      vlm.finishReason = body -> body.contains("normalize") ? "stop" : null;
+      EnrichServiceGrpc.EnrichServiceStub stub = startService(vlm.url());
+      EnrichOptions options = EnrichOptions.newBuilder()
+          .setDoCodeEnrichment(true)
+          .setDoFormulaEnrichment(true)
+          .setDocument(documentOneCodeOneFormula())
+          .build();
+      Collected result = runRpc(stub, List.of(optionsRequest(options)));
+
+      assertThat(result.error()).isNull();
+      ItemAnnotation code = annotations(result).stream()
+          .filter(a -> a.getSelfRef().equals("#/texts/0")).findFirst().orElseThrow();
+      assertThat(code.getGeneration().getStopReason())
+          .isEqualTo(VlmStopReason.VLM_STOP_REASON_END_OF_SEQUENCE);
+      assertThat(code.getGeneration().getFinishReason()).isEqualTo("stop");
+      // An endpoint that reports no finish reason is not given one.
+      ItemAnnotation formula = annotations(result).stream()
+          .filter(a -> a.getSelfRef().equals("#/texts/1")).findFirst().orElseThrow();
+      assertThat(formula.hasGeneration()).isTrue();
+      assertThat(formula.getGeneration().hasFinishReason()).isFalse();
+      assertThat(formula.getGeneration().getStopReason())
+          .isEqualTo(VlmStopReason.VLM_STOP_REASON_UNSPECIFIED);
     }
   }
 

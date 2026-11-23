@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
+import ai.pipestream.document.v1.VlmStopReason;
 import ai.pipestream.enrich.vlm.VlmClient.VlmException;
+import ai.pipestream.enrich.vlm.VlmClient.VlmReply;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -28,10 +30,67 @@ class OpenAiCompatVlmClientTest {
   void transient503Then200_succeeds() throws Exception {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
       vlm.statusForCall = call -> call == 1 ? 503 : 200;
-      String content = client(vlm).complete("m", "describe", null, 200, Duration.ofSeconds(5));
+      String content =
+          client(vlm).complete("m", "describe", null, 200, Duration.ofSeconds(5)).content();
 
       assertThat(content).isEqualTo("fake description");
       assertThat(vlm.requests.size()).as("one 503 must trigger exactly one retry").isEqualTo(2);
+    }
+  }
+
+  @Test
+  void finishReasonLength_marksTheReplyTruncated() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.responder = body -> "a description that stops mid";
+      vlm.finishReason = body -> "length";
+      VlmReply reply = client(vlm).complete("m", "describe", null, 200, Duration.ofSeconds(5));
+
+      assertThat(reply.content()).isEqualTo("a description that stops mid");
+      assertThat(reply.finishReason()).contains("length");
+      assertThat(reply.stopReason()).isEqualTo(VlmStopReason.VLM_STOP_REASON_LENGTH);
+      assertThat(reply.truncated()).isTrue();
+    }
+  }
+
+  @Test
+  void finishReasonStop_isTheModelsOwnEnd() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.finishReason = body -> "stop";
+      VlmReply reply = client(vlm).complete("m", "describe", null, 200, Duration.ofSeconds(5));
+
+      assertThat(reply.finishReason()).contains("stop");
+      assertThat(reply.stopReason()).isEqualTo(VlmStopReason.VLM_STOP_REASON_END_OF_SEQUENCE);
+      assertThat(reply.truncated()).isFalse();
+    }
+  }
+
+  @Test
+  void finishReason_missingNullOrNotAReason_isNotReported() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      OpenAiCompatVlmClient client = client(vlm);
+      // The default envelope carries no finish_reason at all.
+      assertThat(client.complete("m", "p", null, 10, Duration.ofSeconds(5)).finishReason())
+          .isEmpty();
+      for (String finish : new String[] {"null", "7", "{\"a\":1}",
+          "\"" + "x".repeat(VlmReply.MAX_FINISH_REASON_CHARS + 1) + "\""}) {
+        vlm.rawOkBody = "{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":"
+            + finish + "}]}";
+        VlmReply reply = client.complete("m", "p", null, 10, Duration.ofSeconds(5));
+        assertThat(reply.content()).isEqualTo("ok");
+        assertThat(reply.finishReason()).as("finish_reason %s", finish).isEmpty();
+        assertThat(reply.stopReason()).isEqualTo(VlmStopReason.VLM_STOP_REASON_UNSPECIFIED);
+      }
+    }
+  }
+
+  @Test
+  void finishReason_unknownValueIsKeptVerbatimAndUnclassified() throws Exception {
+    try (FakeVlmServer vlm = new FakeVlmServer()) {
+      vlm.finishReason = body -> "tool_calls";
+      VlmReply reply = client(vlm).complete("m", "p", null, 10, Duration.ofSeconds(5));
+
+      assertThat(reply.finishReason()).contains("tool_calls");
+      assertThat(reply.stopReason()).isEqualTo(VlmStopReason.VLM_STOP_REASON_UNSPECIFIED);
     }
   }
 
