@@ -13,6 +13,7 @@ import ai.pipestream.document.v1.PictureTabularChartData;
 import ai.pipestream.enrich.engine.ItemSelector.Kind;
 import ai.pipestream.enrich.engine.ItemSelector.Selection;
 import ai.pipestream.enrich.engine.ItemSelector.WorkItem;
+import ai.pipestream.enrich.v1.AnnotationInput;
 import ai.pipestream.enrich.v1.EnrichComplete;
 import ai.pipestream.enrich.v1.EnrichDocumentResponse;
 import ai.pipestream.enrich.v1.EnrichOptions;
@@ -403,6 +404,7 @@ public final class EnrichmentEngine {
         .setChartExtractions((int) selection.count(Kind.CHART))
         .setCodeEnrichments((int) selection.count(Kind.CODE))
         .setFormulaEnrichments((int) selection.count(Kind.FORMULA))
+        .setUnmatchedImages(selection.unmatchedImages())
         .build()));
 
     AtomicInteger succeeded = new AtomicInteger();
@@ -661,6 +663,12 @@ public final class EnrichmentEngine {
         case FORMULA -> annotation.getFormulaBuilder()
             .setText(FormulaReply.text(item.prompt(), content));
       }
+      // What the model was given: a text-only call rewrites the item's text
+      // without seeing the page, and its annotation must not pass for a
+      // reading of the image.
+      annotation.setInput(item.image() == null
+          ? AnnotationInput.ANNOTATION_INPUT_TEXT_ONLY
+          : AnnotationInput.ANNOTATION_INPUT_IMAGE);
       ItemAnnotation built = annotation.build();
       succeeded.incrementAndGet();
       enriched.add(new EnrichedItem(item, built));
