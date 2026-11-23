@@ -55,7 +55,7 @@ ENRICH_VLM_URL=http://localhost:8080 \
 | `ENRICH_MAX_DOCUMENT_MIB` | `70` | Byte cap on a document (inline or chunked) plus its `ItemImage` crops (`RESOURCE_EXHAUSTED` above); also sizes the HTTP body limit |
 | `ENRICH_MAX_CONCURRENT_VLM` | cores (min 2) | Process-wide cap on concurrent VLM calls, shared by every request; also bounds `EnrichOptions.concurrency` |
 | `ENRICH_VLM_TIMEOUT_SECONDS` | `300` | Per-VLM-call timeout (the reply body included), and the ceiling on `EnrichOptions.timeout_seconds` |
-| `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables |
+| `ENRICH_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval; 0 disables. The line counts documents started and completed, items annotated and failed, and skips by reason (`docs{started=..,completed=..} items{annotated=..,failed=..} skipped{no_image=..,vlm_error=..,...} rpcs{rejected=..}`), so a VLM that is down reads as `annotated=0` with the items under `vlm_error`. Each distinct VLM failure message is also logged once at WARNING |
 
 The server registers `grpc.health.v1.Health` and server reflection (v1 and
 v1alpha).
@@ -151,7 +151,10 @@ applies the default 0.05, and a negative value disables the threshold.
 Pictures without provenance or a known page size are treated as full-page and
 always pass. Chart extraction runs when the picture's top figure-class
 prediction is one of the supported chart types (`bar_chart`, `pie_chart`,
-`line_chart`) or the picture carries the label `DOC_ITEM_LABEL_CHART`. Code
+`line_chart`) or the picture carries the label `DOC_ITEM_LABEL_CHART`. The
+two jobs are independent, as in Docling: a chart picture with both
+`do_picture_description` and `do_chart_extraction` set is described and
+extracted, and each job answers with its own event. Code
 and formula items are selected by their existing item labels; this service
 does not re-run layout.
 
@@ -220,7 +223,9 @@ picture descriptions only.
 Transient VLM failures (HTTP 429/500/502/503/504 and connection drops) are
 retried up to 5 times with exponential backoff starting at 0.1s (or the
 endpoint's `Retry-After`), then the item is skipped with
-`SKIP_REASON_VLM_ERROR` rather than failing the RPC. The per-call timeout
+`SKIP_REASON_VLM_ERROR` rather than failing the RPC. An item this service
+itself failed on (a fault here, not in the endpoint) is an `ItemSkipped` with
+`SKIP_REASON_INTERNAL_ERROR`, counted in `EnrichComplete.failed`. The per-call timeout
 bounds the whole call, every attempt and every wait between them included: a
 retry that could not start before it passes is not made. A reply larger than
 4 MiB, or a call that does not finish within the per-call timeout, is a skip

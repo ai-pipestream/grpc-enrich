@@ -105,6 +105,7 @@ public final class EnrichmentEngine {
   private final Semaphore processSlots;
   /** Resolves a caller endpoint's host for the public-address check. */
   private final PublicAddress.Resolver resolver;
+  private final EnrichMetrics metrics = new EnrichMetrics();
 
   /** An engine whose only endpoint is {@code defaultEndpoint}: no key, and
    * per-request endpoints refused. */
@@ -403,8 +404,13 @@ public final class EnrichmentEngine {
       Document document,
       Map<String, ItemImage> crops,
       EnrichOptions options,
-      Consumer<EnrichDocumentResponse> emit,
+      Consumer<EnrichDocumentResponse> caller,
       Cancellation cancellation) {
+    // Every event is counted on its way out, so the metrics are the events.
+    Consumer<EnrichDocumentResponse> emit = event -> {
+      observe(event);
+      caller.accept(event);
+    };
     Selection selection = ItemSelector.select(document, crops,
         FormulaPrompts.resolve(options, endpoints.servedModel()));
     emit.accept(event(EnrichStarted.newBuilder()
@@ -456,6 +462,25 @@ public final class EnrichmentEngine {
     }
     emit.accept(event(complete.build()));
     return true;
+  }
+
+  /** The process-wide counts of what this engine's enrichments did. */
+  public EnrichMetrics metrics() {
+    return metrics;
+  }
+
+  /** Counts {@code event}, and logs a VLM failure the first time its message
+   * is seen: the caller gets every skip, the server log one line per kind of
+   * failure. The detail is already the safe message for a caller endpoint. */
+  private void observe(EnrichDocumentResponse event) {
+    metrics.record(event);
+    if (event.hasSkipped()
+        && event.getSkipped().getReason() == SkipReason.SKIP_REASON_VLM_ERROR
+        && metrics.firstSighting(event.getSkipped().getDetail())) {
+      LOG.log(System.Logger.Level.WARNING, "VLM call failed for "
+          + event.getSkipped().getSelfRef() + ": " + event.getSkipped().getDetail()
+          + " (logged once per distinct failure; counts are on the metrics line)");
+    }
   }
 
   /** The request's concurrency, within the server's cap. The field is uint32
@@ -699,7 +724,7 @@ public final class EnrichmentEngine {
     failed.incrementAndGet();
     LOG.log(System.Logger.Level.ERROR,
         "unexpected failure enriching " + call.item().selfRef(), failure);
-    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_UNSPECIFIED,
+    emit.accept(skippedEvent(call.item(), SkipReason.SKIP_REASON_INTERNAL_ERROR,
         "unexpected failure enriching this item: " + (call.callerChosen()
             ? failure.getClass().getSimpleName()
             : failure.toString())));
