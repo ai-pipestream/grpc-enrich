@@ -276,7 +276,10 @@ itself failed on (a fault here, not in the endpoint) is an `ItemSkipped` with
 bounds the whole call, every attempt and every wait between them included: a
 retry that could not start before it passes is not made. A reply larger than
 4 MiB, or a call that does not finish within the per-call timeout, is a skip
-too. Every skip carries an explicit reason, and description
+too. So is a reply with no text in it (`"content": ""`, or only the sentinels
+post-processing strips): it is `SKIP_REASON_VLM_ERROR` with
+`model returned no text`, never an annotation with empty text, and with
+`return_document` it never replaces the item's own text. Every skip carries an explicit reason, and description
 annotations record the model name as provenance. A cancelled call (client
 cancel, expired deadline, failed RPC) interrupts its VLM calls in flight and
 starts no more.
