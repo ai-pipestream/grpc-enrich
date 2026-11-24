@@ -362,15 +362,24 @@ public final class ItemSelector {
     return area / pageArea >= threshold;
   }
 
-  /** Resolves image bytes for an item: an ItemImage crop wins, then an inline
-   * data URI on the item's ImageRef. Anything else is null (skipped). */
+  /** Resolves the image for an item: an ItemImage crop wins, then the bytes
+   * the item's ImageRef holds in {@code data}, then an inline data URI in
+   * its {@code uri} (how a producer that predates {@code data} spells the
+   * same thing). Anything else is null (skipped). Held bytes are referenced
+   * like a crop's, not copied or encoded here. */
   private static VlmImage image(
       ImageRef imageRef, String selfRef, Map<String, ItemImage> crops) {
     VlmImage crop = crop(selfRef, crops);
     if (crop != null) {
       return crop;
     }
-    if (imageRef != null && imageRef.getUri().startsWith("data:")) {
+    if (imageRef == null) {
+      return null;
+    }
+    if (!imageRef.getData().isEmpty()) {
+      return new VlmImage.Bytes(imageRef.getMimetype(), imageRef.getData());
+    }
+    if (imageRef.getUri().startsWith("data:")) {
       return new VlmImage.DataUri(imageRef.getUri());
     }
     return null;

@@ -141,10 +141,12 @@ public interface VlmClient {
    * never all base64-encoded and held at once.
    */
   sealed interface VlmImage {
-    /** A complete {@code data:} URI, as an ImageRef carries it inline. */
+    /** A complete {@code data:} URI, as an ImageRef from a producer that
+     * predates {@code ImageRef.data} carries it inline. */
     record DataUri(String uri) implements VlmImage {}
 
-    /** Raw image bytes from an ItemImage crop; empty mimetype means PNG. */
+    /** Raw image bytes from an ItemImage crop or from {@code ImageRef.data};
+     * empty mimetype means PNG. */
     record Bytes(String mimetype, ByteString data) implements VlmImage {}
   }
 
