@@ -3,6 +3,7 @@ package ai.pipestream.enrich.server;
 import ai.pipestream.enrich.engine.EnrichmentEngine;
 import ai.pipestream.enrich.vlm.OpenAiCompatVlmClient;
 import ai.pipestream.enrich.vlm.VlmEndpoint;
+import ai.pipestream.enrich.vlm.VlmProbe;
 import io.grpc.Grpc;
 import io.grpc.InsecureServerCredentials;
 import io.grpc.Server;
@@ -10,6 +11,7 @@ import io.grpc.protobuf.services.HealthStatusManager;
 import io.grpc.protobuf.services.ProtoReflectionService;
 import io.grpc.protobuf.services.ProtoReflectionServiceV1;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -27,6 +29,10 @@ public final class GrpcEnrichServer {
    * is set. */
   static final int RESERVED_HTTP_PORT = EnrichConfig.RESERVED_HTTP_PORT;
 
+  /** How long one VLM health probe may take before the endpoint counts as
+   * not serving. */
+  static final Duration VLM_PROBE_TIMEOUT = Duration.ofSeconds(5);
+
   private GrpcEnrichServer() {}
 
   public static void main(String[] args) throws Exception {
@@ -42,14 +48,22 @@ public final class GrpcEnrichServer {
         config.maxConcurrentVlm(),
         config.vlmTimeout(),
         executor);
+    // Health follows the VLM from the first answer on: NOT_SERVING until an
+    // operator-named endpoint has answered a probe.
+    HealthStatusManager health = new HealthStatusManager();
+    VlmHealth vlmHealth = new VlmHealth(config.endpointPolicy(),
+        new VlmProbe(VLM_PROBE_TIMEOUT), health, config.vlmProbeInterval());
     EnrichServiceImpl service = new EnrichServiceImpl(
-        config.maxDocumentBytes(), engine, executor, config.vlmUrl(), config.maxConcurrentVlm());
+        config.maxDocumentBytes(), engine, executor, config.vlmUrl(), config.maxConcurrentVlm(),
+        vlmHealth);
 
-    Server server = startGrpcServer(config, service);
+    Server server = startGrpcServer(config, service, health);
+    vlmHealth.start();
     EnrichHttpServer httpServer = startHttpServer(config, service, executor);
     ScheduledExecutorService metrics = startMetrics(config, service, engine);
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+      vlmHealth.close();
       if (metrics != null) {
         metrics.shutdownNow();
       }
@@ -69,9 +83,9 @@ public final class GrpcEnrichServer {
     server.awaitTermination();
   }
 
-  private static Server startGrpcServer(EnrichConfig config, EnrichServiceImpl service)
+  private static Server startGrpcServer(
+      EnrichConfig config, EnrichServiceImpl service, HealthStatusManager health)
       throws IOException {
-    HealthStatusManager health = new HealthStatusManager();
     Server server =
         Grpc.newServerBuilderForPort(config.port(), InsecureServerCredentials.create())
             // Allow single-chunk uploads of a full-size document plus framing.

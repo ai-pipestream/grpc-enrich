@@ -53,6 +53,26 @@ class VlmEndpointTest {
   }
 
   @Test
+  void modelsUri_isTheSiblingOfChatCompletions() {
+    assertThat(VlmEndpoint.modelsUri("http://vlm:8080")).hasToString("http://vlm:8080/v1/models");
+    assertThat(VlmEndpoint.modelsUri("https://api.example.com/v1/"))
+        .hasToString("https://api.example.com/v1/models");
+    assertThat(VlmEndpoint.modelsUri("http://ovms:8000/v3/chat/completions"))
+        .hasToString("http://ovms:8000/v3/models");
+    assertThat(VlmEndpoint.modelsUri("http://proxy/models/llama"))
+        .hasToString("http://proxy/models/llama/v1/models");
+  }
+
+  @Test
+  void modelsUri_ofAVerbatimUrlWithAQuery_isUnknown() {
+    // An Azure deployment or a signed URL is used as given: nothing beside
+    // it can be named.
+    assertThat(VlmEndpoint.modelsUri(
+        "https://x.openai.azure.com/openai/deployments/d/chat/completions?api-version=2024-02-01"))
+        .isNull();
+  }
+
+  @Test
   void unusableUrls_areRefusedWithoutRepeatingThem() {
     for (String bad : new String[] {"file:///etc/passwd", "ftp://host/x", "http:///x",
         "not a url", "//no-scheme/x"}) {

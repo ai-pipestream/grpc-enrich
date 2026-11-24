@@ -40,6 +40,8 @@ import java.util.Set;
  *     blank and "0" all leave it off)
  * @param vlmModel the model ENRICH_VLM_URL serves (ENRICH_VLM_MODEL); empty when
  *     unknown. A general VLM gets the LaTeX formula prompt by default
+ * @param vlmProbeInterval time between health probes of the operator-named
+ *     VLM endpoints (ENRICH_VLM_PROBE_INTERVAL_SECONDS)
  */
 record EnrichConfig(
     int port,
@@ -52,15 +54,17 @@ record EnrichConfig(
     Duration vlmTimeout,
     Duration metricsInterval,
     Integer httpPort,
-    String vlmModel) {
+    String vlmModel,
+    Duration vlmProbeInterval) {
 
   /** The port the fleet reserves for the HTTP front end; an operator who
    * wants the shim sets ENRICH_HTTP_PORT to it. Nothing listens by default. */
   static final int RESERVED_HTTP_PORT = 50068;
 
-  /** Reads and validates every knob from the process environment. */
+  /** Reads and validates every knob from the process environment, and
+   * refuses a configuration that names no VLM at all. */
   static EnrichConfig fromEnv() {
-    return from(System.getenv());
+    return from(System.getenv()).requireVlmEndpoint();
   }
 
   /** Reads and validates every knob from {@code env}. */
@@ -77,7 +81,25 @@ record EnrichConfig(
         Duration.ofSeconds(intFromEnv(env, "ENRICH_VLM_TIMEOUT_SECONDS", 300, 1, 86400)),
         Duration.ofSeconds(intFromEnv(env, "ENRICH_METRICS_INTERVAL_SECONDS", 60, 0, 86400)),
         httpPortFromEnv(env),
-        env.getOrDefault("ENRICH_VLM_MODEL", "").strip());
+        env.getOrDefault("ENRICH_VLM_MODEL", "").strip(),
+        Duration.ofSeconds(intFromEnv(env, "ENRICH_VLM_PROBE_INTERVAL_SECONDS", 15, 1, 3600)));
+  }
+
+  /**
+   * Fails startup when no request could ever reach a VLM: no default
+   * endpoint, and a request may not name one either. Such a server would
+   * answer every RPC OK and skip every item.
+   *
+   * @return this configuration, when it can enrich something
+   */
+  EnrichConfig requireVlmEndpoint() {
+    if (vlmUrl.isEmpty() && !allowRequestEndpoint && vlmEndpointAllowlist.isEmpty()) {
+      throw new IllegalArgumentException("no VLM endpoint is configured: ENRICH_VLM_URL is"
+          + " unset and requests may not name one (ENRICH_VLM_ENDPOINT_ALLOWLIST is empty,"
+          + " ENRICH_ALLOW_REQUEST_ENDPOINT is off). Set ENRICH_VLM_URL, or allow"
+          + " per-request endpoints");
+    }
+    return this;
   }
 
   /** The endpoint policy these knobs describe. */
@@ -105,7 +127,8 @@ record EnrichConfig(
         + ", maxConcurrentVlm=" + maxConcurrentVlm
         + ", vlmTimeout=" + vlmTimeout
         + ", metricsInterval=" + metricsInterval
-        + ", httpPort=" + httpPort + "]";
+        + ", httpPort=" + httpPort
+        + ", vlmProbeInterval=" + vlmProbeInterval + "]";
   }
 
   private static String vlmUrlFromEnv(Map<String, String> env) {

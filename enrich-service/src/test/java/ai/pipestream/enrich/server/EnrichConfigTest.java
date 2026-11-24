@@ -73,6 +73,44 @@ class EnrichConfigTest {
   }
 
   @Test
+  void noVlmAtAll_failsStartup() {
+    // No default endpoint and no way for a request to name one: every item
+    // of every document would be skipped, so the server must not start.
+    assertThatThrownBy(() -> EnrichConfig.from(Map.of()).requireVlmEndpoint())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("no VLM endpoint is configured")
+        .hasMessageContaining("ENRICH_VLM_URL");
+    assertThatThrownBy(() -> EnrichConfig.from(
+        Map.of("ENRICH_ALLOW_REQUEST_ENDPOINT", "false")).requireVlmEndpoint())
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void anyWayToReachAVlm_passesTheStartupCheck() {
+    for (Map<String, String> env : java.util.List.of(
+        Map.of("ENRICH_VLM_URL", "http://vlm:8080"),
+        Map.of("ENRICH_VLM_ENDPOINT_ALLOWLIST", "http://vlm:8080"),
+        Map.of("ENRICH_ALLOW_REQUEST_ENDPOINT", "true"))) {
+      EnrichConfig config = EnrichConfig.from(env);
+      assertThat(config.requireVlmEndpoint()).as(env.toString()).isSameAs(config);
+    }
+  }
+
+  @Test
+  void vlmProbeInterval_defaultsTo15Seconds_andIsBounded() {
+    assertThat(EnrichConfig.from(Map.of()).vlmProbeInterval())
+        .isEqualTo(java.time.Duration.ofSeconds(15));
+    assertThat(EnrichConfig.from(Map.of("ENRICH_VLM_PROBE_INTERVAL_SECONDS", "2"))
+        .vlmProbeInterval()).isEqualTo(java.time.Duration.ofSeconds(2));
+    for (String bad : new String[] {"0", "-1", "3601", "soon"}) {
+      assertThatThrownBy(
+          () -> EnrichConfig.from(Map.of("ENRICH_VLM_PROBE_INTERVAL_SECONDS", bad))).as(bad)
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("ENRICH_VLM_PROBE_INTERVAL_SECONDS");
+    }
+  }
+
+  @Test
   void unusableVlmUrl_failsAtStartupWithoutRepeatingIt() {
     String bad = "ftp://user:url-secret@vlm/x";
     assertThatThrownBy(() -> EnrichConfig.from(Map.of("ENRICH_VLM_URL", bad)))

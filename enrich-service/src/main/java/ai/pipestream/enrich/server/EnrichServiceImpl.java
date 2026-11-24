@@ -71,18 +71,43 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
   private final ExecutorService executor;
   private final String defaultEndpoint;
   private final int maxConcurrentVlmCalls;
+  // Null when this service is embedded without a health tracker.
+  private final VlmHealth vlmHealth;
 
+  /** A service with no VLM health tracker: GetServiceInfo lists no
+   * endpoint states and {@link #vlmServing()} is always true. */
   public EnrichServiceImpl(
       long maxDocumentBytes,
       EnrichmentEngine engine,
       ExecutorService executor,
       String defaultEndpoint,
       int maxConcurrentVlmCalls) {
+    this(maxDocumentBytes, engine, executor, defaultEndpoint, maxConcurrentVlmCalls, null);
+  }
+
+  /**
+   * @param vlmHealth what the operator-named VLM endpoints last answered,
+   *     reported by GetServiceInfo and followed by the HTTP health check
+   */
+  public EnrichServiceImpl(
+      long maxDocumentBytes,
+      EnrichmentEngine engine,
+      ExecutorService executor,
+      String defaultEndpoint,
+      int maxConcurrentVlmCalls,
+      VlmHealth vlmHealth) {
     this.maxDocumentBytes = maxDocumentBytes;
     this.engine = engine;
     this.executor = executor;
     this.defaultEndpoint = defaultEndpoint;
     this.maxConcurrentVlmCalls = maxConcurrentVlmCalls;
+    this.vlmHealth = vlmHealth;
+  }
+
+  /** Whether a VLM this server depends on is answering; the same answer
+   * {@code grpc.health.v1} gives. */
+  public boolean vlmServing() {
+    return vlmHealth == null || vlmHealth.serving();
   }
 
   @Override
@@ -309,14 +334,17 @@ public final class EnrichServiceImpl extends EnrichServiceGrpc.EnrichServiceImpl
   @Override
   public void getServiceInfo(
       GetServiceInfoRequest request, StreamObserver<GetServiceInfoResponse> responseObserver) {
-    responseObserver.onNext(GetServiceInfoResponse.newBuilder()
+    GetServiceInfoResponse.Builder info = GetServiceInfoResponse.newBuilder()
         .setServiceVersion(SERVICE_VERSION)
         .setApiVersion(API_VERSION)
         .setDefaultVlmEndpoint(VlmEndpoint.origin(defaultEndpoint))
         .setMaxDocumentBytes(maxDocumentBytes)
         .setMaxConcurrentVlmCalls(maxConcurrentVlmCalls)
-        .setUi(UI_INFO)
-        .build());
+        .setUi(UI_INFO);
+    if (vlmHealth != null) {
+      info.addAllVlmEndpoints(vlmHealth.endpoints());
+    }
+    responseObserver.onNext(info.build());
     responseObserver.onCompleted();
   }
 }
