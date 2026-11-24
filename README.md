@@ -238,13 +238,20 @@ the summary lands in the picture's `meta.description` and the code in
 `meta.code`, both with `created_by` naming the model that answered.
 
 Code and formula items are sent as image crops when an `ItemImage` is
-supplied for the item's `self_ref` (code items may also carry an inline
-data-URI `ImageRef`); without a crop, a text-only prompt with the existing
+supplied for the item's `self_ref` (a code item may also hold its image in
+its own `ImageRef`); without an image, a text-only prompt with the existing
 item text is the fallback. Every annotation says which it was:
 `ItemAnnotation.input` is `ANNOTATION_INPUT_IMAGE` or
 `ANNOTATION_INPUT_TEXT_ONLY`, so a transcription written from the text layer
 alone never passes for one read off the page. A code item whose `ImageRef` is
-a non-data URI is skipped (`SKIP_REASON_UNFETCHABLE_URI`), not sent as text.
+only a reference (a non-data URI and no bytes) is skipped
+(`SKIP_REASON_UNFETCHABLE_URI`), not sent as text.
+
+An item's image is looked for in this order: the `ItemImage` crop sent for
+its `self_ref`, the bytes in `ImageRef.data`, a base64 `data:` URI in
+`ImageRef.uri` (how producers that predate `data` spell the same thing).
+Bytes are held as they arrived and base64-encoded only for their own VLM
+call.
 `EnrichStarted.unmatched_images` counts the `ItemImage` crops whose
 `self_ref` names no picture, code or formula item; non-zero means the crop
 keys and the document disagree. Output is post-processed: truncate at

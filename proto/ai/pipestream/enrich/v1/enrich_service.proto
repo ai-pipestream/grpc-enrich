@@ -348,8 +348,8 @@ message ItemAnnotation {
 enum AnnotationInput {
   // Never emitted; the zero value required by proto3.
   ANNOTATION_INPUT_UNSPECIFIED = 0;
-  // The item's image (an ItemImage crop or an inline data URI) went with the
-  // prompt.
+  // The item's image (an ItemImage crop, the bytes in its ImageRef.data, or
+  // an inline data URI) went with the prompt.
   ANNOTATION_INPUT_IMAGE = 1;
   // No image was available for the item, so the prompt carried only the
   // item's existing text (code and formula items; the documented fallback
@@ -476,11 +476,12 @@ message EnrichComplete {
 enum SkipReason {
   // Never emitted; the zero value required by proto3.
   SKIP_REASON_UNSPECIFIED = 0;
-  // The item has no image bytes: no inline data URI and no ItemImage crop
-  // was supplied for its self_ref.
+  // The item has no image bytes: nothing in its ImageRef.data, no inline
+  // data URI, and no ItemImage crop was supplied for its self_ref.
   SKIP_REASON_NO_IMAGE = 1;
-  // The item's image is a non-data URI and the server is not configured to
-  // fetch external image URIs (the default; inline only, no outbound HTTP).
+  // The item's image is only a reference (a non-data URI, no bytes in
+  // ImageRef.data) and the server is not configured to fetch external image
+  // URIs (the default; inline only, no outbound HTTP).
   SKIP_REASON_UNFETCHABLE_URI = 2;
   // The picture's area is below EnrichOptions.picture_description_area_threshold.
   SKIP_REASON_BELOW_AREA_THRESHOLD = 3;

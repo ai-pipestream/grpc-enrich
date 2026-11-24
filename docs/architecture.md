@@ -75,8 +75,9 @@ continue).
 share crop/PNG encode with gRParse's picture pipeline; Java if we want this
 next to protomolt's mapper. Either way: no PyTorch in the serving path.
 
-Picture bytes come from `ImageRef` on the item (data URI or a claim-check the
-caller already filled). This service does not rasterize PDFs.
+Picture bytes come from `ImageRef` on the item (its `data` bytes, or a data
+URI from a producer that predates `data`) or from an `ItemImage` crop the
+caller sends beside the document. This service does not rasterize PDFs.
 
 ## Relationship to gRParse
 
