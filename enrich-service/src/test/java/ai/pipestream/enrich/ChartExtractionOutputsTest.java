@@ -216,7 +216,10 @@ class ChartExtractionOutputsTest {
       assertThat(annotations).hasSize(3);
       assertThat(annotations).allSatisfy(annotation -> {
         assertThat(annotation.getSelfRef()).isEqualTo("#/pictures/0");
-        assertThat(annotation.getModel()).isEqualTo("granite-vision-4.1-4b");
+        // The fake endpoint names no model, so none is claimed; the name
+        // that was asked for is in its own field.
+        assertThat(annotation.getRequestedModel()).isEqualTo("granite-vision-4.1-4b");
+        assertThat(annotation.getModel()).isEmpty();
       });
       ItemAnnotation table = annotations.stream().filter(ItemAnnotation::hasChartTable)
           .findFirst().orElseThrow();
@@ -372,6 +375,9 @@ class ChartExtractionOutputsTest {
   void returnDocument_foldsSummaryAndCodeIntoMeta() throws Exception {
     try (FakeVlmServer vlm = new FakeVlmServer()) {
       vlm.responder = ChartExtractionOutputsTest::replyFor;
+      // created_by is the model the endpoint says answered, not the
+      // "chart-model" the request asks for.
+      vlm.servedModel = body -> "served-chart-model";
       Collected result = run(startService(vlm.url()), chartOptions(
           ChartExtractionOptions.newBuilder()
               .setSummary(true)
@@ -383,11 +389,11 @@ class ChartExtractionOutputsTest {
       assertThat(result.error()).isNull();
       PictureItem patched = result.complete().getDocument().getPictures(0);
       assertThat(patched.getMeta().getDescription().getText()).isEqualTo(SUMMARY_REPLY);
-      assertThat(patched.getMeta().getDescription().getCreatedBy()).isEqualTo("chart-model");
+      assertThat(patched.getMeta().getDescription().getCreatedBy()).isEqualTo("served-chart-model");
       assertThat(patched.getMeta().getCode().getText()).startsWith("import matplotlib");
       assertThat(patched.getMeta().getCode().getLanguage())
           .isEqualTo(CodeLanguageLabel.CODE_LANGUAGE_LABEL_PYTHON);
-      assertThat(patched.getMeta().getCode().getCreatedBy()).isEqualTo("chart-model");
+      assertThat(patched.getMeta().getCode().getCreatedBy()).isEqualTo("served-chart-model");
       assertThat(patched.getAnnotationsList().stream().anyMatch(a -> a.hasTabularChart()))
           .isTrue();
     }

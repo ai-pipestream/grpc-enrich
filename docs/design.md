@@ -54,7 +54,8 @@ Events:
 
 1. `EnrichStarted`: item counts selected, plus `unmatched_images` (crops
    whose `self_ref` names no enrichable item)
-2. `ItemAnnotation`: `self_ref`, `input` (image or text-only), plus one of `description` (string, model,
+2. `ItemAnnotation`: `self_ref`, `model` (the one the endpoint says
+   answered), `requested_model` (the name that was sent), `input` (image or text-only), plus one of `description` (string, model,
    confidence), `chart_table` (a `TableData`), `chart_summary` (text),
    `chart_code` (Python text), or `code` / `formula` (text + language). A
    chart with several outputs enabled is answered by one event per output.

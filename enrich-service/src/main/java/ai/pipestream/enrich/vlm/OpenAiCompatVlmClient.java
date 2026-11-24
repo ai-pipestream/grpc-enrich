@@ -438,8 +438,9 @@ public final class OpenAiCompatVlmClient implements VlmClient {
         HttpRequest.BodyPublishers.ofByteArray(tail.toString().getBytes(StandardCharsets.UTF_8)));
   }
 
-  /** Reads choices[0].message.content and choices[0].finish_reason out of
-   * the chat-completions reply. */
+  /** Decodes the chat-completions reply into a VlmReply:
+   * choices[0].message.content, choices[0].finish_reason, and the reply's
+   * own model. */
   static VlmReply extractReply(String body) throws VlmException {
     final Map<String, Object> root;
     try {
@@ -455,7 +456,8 @@ public final class OpenAiCompatVlmClient implements VlmClient {
       Map<String, Object> first = Json.asObject(choices.get(0));
       Map<String, Object> message = Json.asObject(first.get("message"));
       return new VlmReply(Json.asString(message.get("content")),
-          finishReason(first.get("finish_reason")));
+          finishReason(first.get("finish_reason")),
+          servedModel(root.get("model")));
     } catch (RuntimeException shape) {
       throw new VlmException("VLM response had no choices[0].message.content", snippet(body),
           shape);
@@ -470,6 +472,17 @@ public final class OpenAiCompatVlmClient implements VlmClient {
         && !reason.isEmpty()
         && reason.length() <= VlmReply.MAX_FINISH_REASON_CHARS
         ? Optional.of(reason)
+        : Optional.empty();
+  }
+
+  /** The reply's top-level model when it is a name: a non-blank string no
+   * longer than {@link VlmReply#MAX_MODEL_CHARS}. Anything else (absent,
+   * null, a number, an object) is an endpoint that did not say. */
+  private static Optional<String> servedModel(Object value) {
+    return value instanceof String name
+        && !name.isBlank()
+        && name.length() <= VlmReply.MAX_MODEL_CHARS
+        ? Optional.of(name.strip())
         : Optional.empty();
   }
 

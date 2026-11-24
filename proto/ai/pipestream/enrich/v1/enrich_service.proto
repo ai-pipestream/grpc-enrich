@@ -301,8 +301,12 @@ message EnrichStarted {
 message ItemAnnotation {
   // Self-reference of the annotated item (for example "#/pictures/0").
   string self_ref = 1;
-  // Name of the model that produced the annotation, as reported to or by the
-  // VLM endpoint.
+  // Name of the model that produced the annotation, as the VLM endpoint
+  // reported it in its reply ("model" of the chat-completions response).
+  // Empty when the endpoint reported none: the name the request asked for is
+  // never substituted here, it is in requested_model. Some servers echo the
+  // requested name in their reply; what an endpoint has loaded is its own
+  // model list, GetServiceInfoResponse.vlm_endpoints[].models.
   string model = 2;
   // The annotation payload; the variant identifies the enrichment job.
   oneof annotation {
@@ -331,6 +335,13 @@ message ItemAnnotation {
   // ANNOTATION_INPUT_TEXT_ONLY was written from the item's existing text
   // alone, without the item's image.
   AnnotationInput input = 10;
+  // The model name this service sent to the endpoint: a preset's alias
+  // ("smolvlm", "granite-vision-chart2csv"), the request's own
+  // VlmGenerationParams.model or ChartExtractionOptions.model, or empty when
+  // the request named none. An endpoint serves what it has loaded whatever
+  // name it is asked for, so this is what was asked, and model is what
+  // answered.
+  string requested_model = 11;
 }
 
 // What a VLM call was given for an item.
