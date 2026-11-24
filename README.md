@@ -113,7 +113,13 @@ names its own reachable endpoint still works.
   Chart extraction lands as typed `TableData` cells, never CSV-only. A failed
   VLM call is an `ItemSkipped` (`SKIP_REASON_VLM_ERROR`), never an RPC error.
   Every `ItemAnnotation` carries its `generation` (the model, the endpoint's
-  `finish_reason` verbatim, and that reason classified as `stop_reason`). A
+  `finish_reason` verbatim, and that reason classified as `stop_reason`).
+  `model` (and `generation.model`) is the model the endpoint names in its
+  reply, the one that answered; `requested_model` is the name this service
+  sent (a preset's alias or the request's own). llama.cpp and OVMS serve what
+  they have loaded whatever name they are asked for, so the two can differ.
+  When the endpoint names no model, `model` stays empty: the requested name
+  is never put in its place. A
   reply the model stopped at its token limit is never passed off as whole: a
   code or formula transcription, a chart table or chart code cut that way is
   an `ItemSkipped` (`SKIP_REASON_OUTPUT_TRUNCATED`) and replaces nothing; a
@@ -229,7 +235,7 @@ land. `chart_extraction.model` and `chart_extraction.vlm_endpoint` route the
 chart calls to their own model and endpoint without touching the other jobs.
 All three outputs switched off is `INVALID_ARGUMENT`. With `return_document`,
 the summary lands in the picture's `meta.description` and the code in
-`meta.code`, both with `created_by` naming the model.
+`meta.code`, both with `created_by` naming the model that answered.
 
 Code and formula items are sent as image crops when an `ItemImage` is
 supplied for the item's `self_ref` (code items may also carry an inline
@@ -280,7 +286,7 @@ too. So is a reply with no text in it (`"content": ""`, or only the sentinels
 post-processing strips): it is `SKIP_REASON_VLM_ERROR` with
 `model returned no text`, never an annotation with empty text, and with
 `return_document` it never replaces the item's own text. Every skip carries an explicit reason, and description
-annotations record the model name as provenance. A cancelled call (client
+annotations record the name of the model that answered as provenance. A cancelled call (client
 cancel, expired deadline, failed RPC) interrupts its VLM calls in flight and
 starts no more.
 

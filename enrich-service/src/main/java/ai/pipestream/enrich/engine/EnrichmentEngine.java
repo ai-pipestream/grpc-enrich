@@ -695,13 +695,18 @@ public final class EnrichmentEngine {
         return;
       }
       String content = reply.content();
+      // The model that answered is the one the endpoint names in its reply,
+      // never the name this service asked for: an endpoint serves what it
+      // has loaded whatever it is called. Unknown stays empty.
+      String servedModel = reply.model().orElse("");
       GenerationSource.Builder generation = GenerationSource.newBuilder()
-          .setModel(item.model())
+          .setModel(servedModel)
           .setStopReason(reply.stopReason());
       reply.finishReason().ifPresent(generation::setFinishReason);
       ItemAnnotation.Builder annotation = ItemAnnotation.newBuilder()
           .setSelfRef(item.selfRef())
-          .setModel(item.model())
+          .setModel(servedModel)
+          .setRequestedModel(item.model())
           .setGeneration(generation);
       switch (item.kind()) {
         case DESCRIPTION -> annotation.getDescriptionBuilder().setText(someText(content));

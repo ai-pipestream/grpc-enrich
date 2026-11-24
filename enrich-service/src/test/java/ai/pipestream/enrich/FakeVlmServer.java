@@ -46,6 +46,9 @@ final class FakeVlmServer implements AutoCloseable {
   /** Supplies choices[0].finish_reason for a request body; null leaves the
    * field out, the way a server that does not report one answers. */
   Function<String, String> finishReason = body -> null;
+  /** Supplies the reply's top-level "model" for a request body: the model
+   * this endpoint says answered. Null leaves the field out. */
+  Function<String, String> servedModel = body -> null;
   /** When non-null, the request whose 1-based index is in this map waits on
    * the latch before responding. */
   Map<Integer, CountDownLatch> gates = Map.of();
@@ -98,7 +101,9 @@ final class FakeVlmServer implements AutoCloseable {
         response = rawOkBody.getBytes(StandardCharsets.UTF_8);
       } else {
         String finish = finishReason.apply(body);
-        response = ("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":"
+        String served = servedModel.apply(body);
+        response = ("{" + (served == null ? "" : "\"model\":" + Json.quote(served) + ",")
+                + "\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":"
                 + Json.quote(responder.apply(body)) + "}"
                 + (finish == null ? "" : ",\"finish_reason\":" + Json.quote(finish))
                 + "}]}")

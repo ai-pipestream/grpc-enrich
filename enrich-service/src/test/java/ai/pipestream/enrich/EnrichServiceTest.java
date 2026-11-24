@@ -267,7 +267,9 @@ class EnrichServiceTest {
       assertThat(annotations.get(0).getSelfRef()).isEqualTo("#/pictures/0");
       assertThat(annotations.get(0).getDescription().getText())
           .isEqualTo("a QR code on a white background");
-      assertThat(annotations.get(0).getModel()).isEqualTo("smolvlm");
+      // "smolvlm" is what was asked for; the fake endpoint names no model.
+      assertThat(annotations.get(0).getRequestedModel()).isEqualTo("smolvlm");
+      assertThat(annotations.get(0).getModel()).isEmpty();
       assertThat(skips(result)).isEmpty();
       assertThat(result.events().get(result.events().size() - 1)
           .getComplete().getSucceeded()).isEqualTo(1);
