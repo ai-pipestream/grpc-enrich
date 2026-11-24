@@ -78,23 +78,38 @@ public interface VlmClient {
       Duration timeout) {}
 
   /**
-   * One completion: the text, and why the model stopped writing it. A reply
-   * that stopped at the token limit is cut short, and only its stop reason
-   * says so; the text alone looks like any other.
+   * One completion, decoded: the text, why the model stopped writing it, and
+   * which model the endpoint says wrote it. This record is the one place a
+   * chat-completions reply is read into; nothing downstream reaches back
+   * into the reply. A reply that stopped at the token limit is cut short,
+   * and only its stop reason says so; the text alone looks like any other.
    *
    * @param content the model's text response
    * @param finishReason the endpoint's {@code finish_reason}, verbatim; empty
    *     when the endpoint reported none
+   * @param model the reply's own {@code model}: the model the endpoint says
+   *     answered, which is not always the one the request named; empty when
+   *     the endpoint reported none
    */
-  record VlmReply(String content, Optional<String> finishReason) {
+  record VlmReply(String content, Optional<String> finishReason, Optional<String> model) {
 
     /** The longest {@code finish_reason} kept. The known values are a word
      * or two; anything longer is not a reason and is not carried. */
     public static final int MAX_FINISH_REASON_CHARS = 64;
 
-    /** A reply from an endpoint that reported no finish reason. */
+    /** The longest {@code model} kept: room for a GGUF path, not for a
+     * reply that put something else in the field. */
+    public static final int MAX_MODEL_CHARS = 512;
+
+    /** A reply from an endpoint that did not say which model answered. */
+    public VlmReply(String content, Optional<String> finishReason) {
+      this(content, finishReason, Optional.empty());
+    }
+
+    /** A reply from an endpoint that reported no finish reason and no
+     * model. */
     public static VlmReply of(String content) {
-      return new VlmReply(content, Optional.empty());
+      return new VlmReply(content, Optional.empty(), Optional.empty());
     }
 
     /**

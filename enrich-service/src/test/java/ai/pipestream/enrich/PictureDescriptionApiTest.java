@@ -115,7 +115,8 @@ class PictureDescriptionApiTest {
       // The messages array is ours; params cannot replace it.
       assertThat(Json.asArray(sent.get("messages"))).hasSize(1);
       assertThat(result.annotations()).singleElement()
-          .satisfies(annotation -> assertThat(annotation.getModel()).isEqualTo("gpt-4o-mini"));
+          .satisfies(annotation ->
+              assertThat(annotation.getRequestedModel()).isEqualTo("gpt-4o-mini"));
     }
   }
 
